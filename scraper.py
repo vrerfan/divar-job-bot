@@ -6,6 +6,7 @@ import json
 import os
 import time
 
+# شهرهای استان البرز
 CITIES = [
     "karaj",
     "fardis",
@@ -18,35 +19,50 @@ CITIES = [
 BASE_URL = "https://divar.ir"
 SEEN_FILE = "seen_ads.json"
 
-headers = {
-    "User-Agent": "Mozilla/5.0"
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+CHAT_ID = "8531717188"
+
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0 Safari/537.36"
 }
 
+
+# -----------------------------
 # خواندن آگهی‌های قبلی
-if os.path.exists(SEEN_FILE):
+# -----------------------------
+
+try:
     with open(SEEN_FILE, "r", encoding="utf-8") as f:
         seen_ads = json.load(f)
-else:
+
+    if not isinstance(seen_ads, list):
+        seen_ads = []
+
+except Exception:
     seen_ads = []
 
 print(f"آگهی‌های قبلی: {len(seen_ads)}")
 
+
+# -----------------------------
+# دریافت آگهی‌ها
+# -----------------------------
+
 all_ads = []
 
-# دریافت آگهی‌ها از شهرها
 for city in CITIES:
 
-    time.sleep(10)
+    print(f"در حال بررسی: {city}")
+
+    time.sleep(8)
 
     url = f"{BASE_URL}/s/{city}/jobs"
-
-    print(f"در حال بررسی: {city}")
 
     try:
         response = requests.get(
             url,
-            headers=headers,
-            timeout=20
+            headers=HEADERS,
+            timeout=30
         )
 
         if response.status_code == 429:
@@ -55,12 +71,12 @@ for city in CITIES:
 
             response = requests.get(
                 url,
-                headers=headers,
-                timeout=20
+                headers=HEADERS,
+                timeout=30
             )
 
         if response.status_code != 200:
-            print(f"خطا: {response.status_code}")
+            print(f"❌ خطا در {city}: {response.status_code}")
             continue
 
         soup = BeautifulSoup(
@@ -90,7 +106,8 @@ for city in CITIES:
 
             ad_id = match.group(1)
 
-            if any(x["id"] == ad_id for x in all_ads):
+            # جلوگیری از تکرار داخل همین اجرا
+            if any(ad["id"] == ad_id for ad in all_ads):
                 continue
 
             all_ads.append({
@@ -101,10 +118,13 @@ for city in CITIES:
             })
 
     except Exception as e:
-        print(f"خطا در {city}: {e}")
+        print(f"❌ خطا در {city}: {e}")
 
 
-# فقط آگهی‌هایی که قبلاً ارسال نشده‌اند
+# -----------------------------
+# پیدا کردن آگهی‌های جدید
+# -----------------------------
+
 new_ads = [
     ad for ad in all_ads
     if ad["id"] not in seen_ads
@@ -112,19 +132,21 @@ new_ads = [
 
 ads_to_send = new_ads[:10]
 
+
 print()
 print("=" * 60)
 print(f"کل آگهی‌ها: {len(all_ads)}")
 print(f"آگهی‌های جدید: {len(new_ads)}")
-print(f"انتخاب شده: {len(ads_to_send)}")
+print(f"انتخاب شده برای ارسال: {len(ads_to_send)}")
 print("=" * 60)
 
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHAT_ID = "8531717188"
-
+# -----------------------------
+# ارسال به تلگرام
+# -----------------------------
 
 def send_telegram(message):
+
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     data = {
@@ -133,18 +155,32 @@ def send_telegram(message):
         "disable_web_page_preview": False
     }
 
-    response = requests.post(
-        url,
-        data=data,
-        timeout=20
-    )
+    try:
 
-    print("Telegram:", response.status_code)
+        response = requests.post(
+            url,
+            data=data,
+            timeout=30
+        )
 
-    return response.status_code == 200
+        print("Telegram:", response.status_code)
+
+        if response.status_code != 200:
+            print(response.text)
+
+        return response.status_code == 200
+
+    except Exception as e:
+
+        print("❌ خطای تلگرام:", e)
+
+        return False
 
 
-# ارسال آگهی‌ها
+# -----------------------------
+# ارسال ۱۰ آگهی
+# -----------------------------
+
 for ad in ads_to_send:
 
     message = (
@@ -158,27 +194,33 @@ for ad in ads_to_send:
 
         print(f"✅ ارسال شد: {ad['id']}")
 
-        # فقط بعد از ارسال موفق ذخیره شود
+        # بلافاصله بعد از ارسال موفق، ذخیره شود
         if ad["id"] not in seen_ads:
             seen_ads.append(ad["id"])
 
-            with open(
-                SEEN_FILE,
-                "w",
-                encoding="utf-8"
-            ) as f:
-                json.dump(
-                    seen_ads,
-                    f,
-                    ensure_ascii=False,
-                    indent=2
-                )
-
     else:
+
         print(f"❌ ارسال نشد: {ad['id']}")
+
+
+# -----------------------------
+# ذخیره وضعیت
+# -----------------------------
+
+with open(
+    SEEN_FILE,
+    "w",
+    encoding="utf-8"
+) as f:
+
+    json.dump(
+        seen_ads,
+        f,
+        ensure_ascii=False,
+        indent=2
+    )
 
 
 print()
 print(f"💾 تعداد آگهی‌های ذخیره‌شده: {len(seen_ads)}")
-print("SEEN FILE:", os.path.abspath(SEEN_FILE))
-print("SEEN ADS:", seen_ads)
+print(f"📁 فایل: {os.path.abspath(SEEN_FILE)}")
