@@ -1,8 +1,9 @@
 import os
-import json
 import re
+import json
+import time
 import requests
-from urllib.parse import urlparse
+from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
 
@@ -11,189 +12,283 @@ from playwright.sync_api import sync_playwright
 # =========================
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
+
 CHAT_ID = "8531717188"
 
 JOB_URL = "https://divar.ir/s/alborz-province/jobs"
+
 SEEN_FILE = "seen_ads.json"
 
-MAX_ADS = 10
+DIVAR_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 "
+        "(KHTML, like Gecko) "
+        "Chrome/131.0.0.0 Safari/537.36"
+    ),
+    "Accept": (
+        "text/html,application/xhtml+xml,application/xml;"
+        "q=0.9,image/avif,image/webp,*/*;q=0.8"
+    ),
+    "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Referer": "https://divar.ir/",
+}
 
 
 # =========================
-# ابزارهای کمکی
+# خواندن آگهی‌های دیده شده
 # =========================
-
-def clean_text(text):
-    if not text:
-        return ""
-
-    text = text.replace("\u200c", " ")
-    text = text.replace("\xa0", " ")
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n+", "\n", text)
-
-    return text.strip()
-
 
 def load_seen():
+
     if not os.path.exists(SEEN_FILE):
-        return []
+        return set()
 
     try:
         with open(SEEN_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
 
         if isinstance(data, list):
-            return data
+            return set(data)
 
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"⚠️ خطا در خواندن seen_ads.json: {e}")
 
-    return []
+    return set()
 
+
+# =========================
+# ذخیره آگهی‌های دیده شده
+# =========================
 
 def save_seen(seen):
-    with open(SEEN_FILE, "w", encoding="utf-8") as f:
-        json.dump(seen, f, ensure_ascii=False, indent=2)
 
+    try:
+        with open(SEEN_FILE, "w", encoding="utf-8") as f:
+            json.dump(
+                sorted(list(seen)),
+                f,
+                ensure_ascii=False,
+                indent=2
+            )
+
+        print(f"💾 {len(seen)} آگهی ذخیره شد.")
+
+    except Exception as e:
+        print(f"❌ خطا در ذخیره seen_ads.json: {e}")
+
+
+# =========================
+# استخراج ID آگهی
+# =========================
 
 def get_ad_id(url):
-    try:
-        path = urlparse(url).path.rstrip("/")
-        parts = path.split("/")
 
-        if len(parts) >= 3 and parts[-2] == "v":
-            return parts[-1]
+    if not url:
+        return None
 
-    except Exception:
-        pass
+    match = re.search(
+        r"/v/[^/]+/([A-Za-z0-9_-]+)",
+        url
+    )
+
+    if match:
+        return match.group(1)
 
     return None
 
 
 # =========================
-# پیدا کردن لینک آگهی‌ها
+# دریافت لیست آگهی‌ها
 # =========================
 
-def get_listing_urls(page):
+def get_listing_urls():
 
-    print("🌐 باز کردن صفحه استخدام...")
-
-    page.goto(
-        JOB_URL,
-        wait_until="domcontentloaded",
-        timeout=60000
-    )
-
-    # صبر برای لود کامل محتوای داینامیک دیوار
-    page.wait_for_timeout(8000)
-
-    urls = []
-
-    # ---------------------------------
-    # روش اول: لینک‌های واقعی DOM
-    # ---------------------------------
+    print("🌐 دریافت لیست آگهی‌ها...")
 
     try:
-        hrefs = page.locator("a").evaluate_all(
-            """
-            elements => elements
-                .map(e => e.href)
-                .filter(Boolean)
-            """
+
+        response = requests.get(
+            JOB_URL,
+            headers=DIVAR_HEADERS,
+            timeout=30
         )
 
-        for href in hrefs:
+        print(f"🌐 Jobs page: HTTP {response.status_code}")
 
-            href = href.split("?")[0].split("#")[0]
+        if response.status_code != 200:
+            print("❌ دریافت صفحه استخدام ناموفق بود.")
+            return []
 
-            match = re.search(
-                r"https?://(?:www\.)?divar\.ir/v/[^/]+/([A-Za-z0-9_-]+)$",
-                href
-            )
-
-            if match:
-                if href not in urls:
-                    urls.append(href)
+        html = response.text
 
     except Exception as e:
-        print(f"⚠️ روش اول خطا داد: {e}")
 
-    # ---------------------------------
-    # روش دوم: گرفتن HTML صفحه
-    # ---------------------------------
+        print(f"❌ خطا در دریافت صفحه استخدام: {e}")
+
+        return []
+
+    urls = []
+    ids = set()
+
+    # -------------------------
+    # روش اول: BeautifulSoup
+    # -------------------------
+
+    try:
+
+        soup = BeautifulSoup(
+            html,
+            "html.parser"
+        )
+
+        for a in soup.find_all("a", href=True):
+
+            href = a.get("href")
+
+            if not href:
+                continue
+
+            if "/v/" not in href:
+                continue
+
+            if href.startswith("/"):
+                href = "https://divar.ir" + href
+
+            elif href.startswith("//"):
+                href = "https:" + href
+
+            href = href.split("?")[0]
+            href = href.split("#")[0]
+
+            ad_id = get_ad_id(href)
+
+            if not ad_id:
+                continue
+
+            if len(ad_id) < 5:
+                continue
+
+            if ad_id not in ids:
+
+                ids.add(ad_id)
+                urls.append(href)
+
+    except Exception as e:
+
+        print(f"⚠️ خطا در استخراج لینک‌ها با BeautifulSoup: {e}")
+
+    # -------------------------
+    # روش دوم: Regex
+    # -------------------------
 
     if len(urls) == 0:
 
-        print("🔄 روش دوم برای پیدا کردن آگهی‌ها...")
+        print("🔄 تلاش با Regex...")
 
-        try:
+        patterns = [
 
-            html = page.content()
+            r'https://divar\.ir/v/[^"\'<>\s]+',
 
-            matches = re.findall(
-                r'(?:https://divar\.ir)?/v/[^"\'>\s]+',
-                html
-            )
+            r'/v/[^"\'<>\s]+',
 
-            for href in matches:
+            r'https:\\/\\/divar\.ir\\/v\\/[^"\'<>\s]+',
 
-                if href.startswith("/"):
-                    href = "https://divar.ir" + href
+            r'\\/v\\/[^"\'<>\s]+',
 
-                href = href.split("?")[0].split("#")[0]
+        ]
 
-                match = re.search(
-                    r"https?://(?:www\.)?divar\.ir/v/[^/]+/([A-Za-z0-9_-]+)$",
-                    href
+        for pattern in patterns:
+
+            try:
+
+                matches = re.findall(
+                    pattern,
+                    html
                 )
 
-                if match and href not in urls:
-                    urls.append(href)
+                for href in matches:
 
-        except Exception as e:
-            print(f"⚠️ روش دوم خطا داد: {e}")
+                    href = href.replace(
+                        "\\/",
+                        "/"
+                    )
 
-    # ---------------------------------
-    # حذف موارد خراب
-    # ---------------------------------
+                    if href.startswith("/"):
+                        href = "https://divar.ir" + href
 
-    final_urls = []
+                    href = href.split("?")[0]
+                    href = href.split("#")[0]
 
-    for url in urls:
+                    ad_id = get_ad_id(href)
 
-        ad_id = get_ad_id(url)
+                    if not ad_id:
+                        continue
 
-        if not ad_id:
-            continue
+                    if len(ad_id) < 5:
+                        continue
 
-        if ad_id not in [
-            get_ad_id(x) for x in final_urls
-        ]:
-            final_urls.append(url)
+                    if ad_id not in ids:
 
-    print(f"📋 تعداد آگهی‌های صفحه: {len(final_urls)}")
+                        ids.add(ad_id)
+                        urls.append(href)
 
-    return final_urls
+            except Exception:
+                pass
+
+    print(f"📋 تعداد آگهی‌های صفحه: {len(urls)}")
+
+    return urls
 
 
 # =========================
-# فیلدهای ساختاریافته
+# تمیز کردن متن
 # =========================
 
-def extract_structured_fields(page):
+def clean_text(text):
 
-    data = {}
+    if not text:
+        return ""
+
+    text = text.replace("\u200c", " ")
+    text = text.replace("\xa0", " ")
+
+    text = re.sub(
+        r"[ \t]+",
+        " ",
+        text
+    )
+
+    text = re.sub(
+        r"\n+",
+        "\n",
+        text
+    )
+
+    return text.strip()
+
+
+# =========================
+# استخراج اطلاعات ساختاریافته
+# =========================
+
+def get_structured_info(page):
+
+    info = {}
 
     try:
 
         rows = page.locator(
             'div[data-testid="unexpandable-info-row"]'
-        ).all()
+        )
 
-        for row in rows:
+        count = rows.count()
+
+        for i in range(count):
 
             try:
+
+                row = rows.nth(i)
 
                 title = row.locator(
                     ".kt-unexpandable-row__title"
@@ -207,262 +302,234 @@ def extract_structured_fields(page):
                 value = clean_text(value)
 
                 if title and value:
-                    data[title] = value
+
+                    info[title] = value
 
             except Exception:
                 continue
 
-    except Exception:
-        pass
+    except Exception as e:
 
-    return data
+        print(
+            f"⚠️ خطا در اطلاعات ساختاریافته: {e}"
+        )
+
+    return info
 
 
 # =========================
-# استخراج اطلاعات از متن
+# اعتبارسنجی نوع همکاری
 # =========================
 
-def extract_fallback_fields(lines):
+def valid_cooperation(value):
 
-    data = {}
+    if not value:
+        return False
 
-    # -------------------------
-    # نوع همکاری
-    # -------------------------
+    value = value.strip()
 
-    cooperation_values = [
+    valid = [
+
         "تمام وقت",
+        "تمام‌وقت",
+
         "پاره وقت",
-        "دورکاری",
+        "پاره‌وقت",
+
         "کارآموزی",
+
         "پروژه‌ای",
-        "پروژه ای"
-    ]
+        "پروژه ای",
 
-    for line in lines:
+        "دورکاری",
 
-        line = clean_text(line)
-
-        if line in cooperation_values:
-            data["نوع همکاری"] = line
-            break
-
-    # -------------------------
-    # سابقه
-    # -------------------------
-
-    experience_values = [
-        "بدون نیاز به سابقه",
-        "کمتر از ۱ سال",
-        "کم‌تر از ۱ سال",
-        "کمتر از 1 سال",
-        "کم‌تر از 1 سال",
-        "حداقل ۱ سال",
-        "حداقل 1 سال",
-        "حداقل ۲ سال",
-        "حداقل 2 سال",
-        "حداقل ۳ سال",
-        "حداقل 3 سال",
-        "حداقل ۴ سال",
-        "حداقل 4 سال",
-        "حداقل ۵ سال",
-        "حداقل 5 سال"
-    ]
-
-    for line in lines:
-
-        line = clean_text(line)
-
-        if line in experience_values:
-            data["سابقه کار"] = line
-            break
-
-    # -------------------------
-    # جنسیت
-    # -------------------------
-
-    gender_values = [
-        "آقا",
-        "خانم",
-        "فرقی ندارد",
-        "فرقی نمی‌کند",
-        "فرقی نمی کند"
-    ]
-
-    for line in lines:
-
-        line = clean_text(line)
-
-        if line in gender_values:
-            data["جنسیت"] = line
-            break
-
-    # -------------------------
-    # پرداخت
-    # -------------------------
-
-    payment_values = [
-        "ماهانه",
-        "روزانه",
-        "هفتگی",
         "ساعتی",
-        "پورسانتی",
-        "پورسانتی/درصدی",
-        "توافقی"
+
+        "نیمه وقت",
+        "نیمه‌وقت",
+
     ]
 
-    for line in lines:
-
-        line = clean_text(line)
-
-        if line in payment_values:
-            data["پرداخت"] = line
-            break
-
-    # -------------------------
-    # حقوق
-    # -------------------------
-
-    for line in lines:
-
-        line = clean_text(line)
-
-        if "تومان" not in line:
-            continue
-
-        if (
-            "میلیون" in line
-            or "میلیارد" in line
-            or "توافقی" in line
-        ):
-            data["حقوق"] = line
-            break
-
-    # -------------------------
-    # ساعت کاری
-    # -------------------------
-
-    for line in lines:
-
-        line = clean_text(line)
-
-        # حقوق و سن را ساعت کاری حساب نکن
-        if "تومان" in line:
-            continue
-
-        if "سال" in line:
-            continue
-
-        if "سن" in line:
-            continue
-
-        if re.search(
-            r"از\s*[۰-۹0-9]{1,2}\s*تا\s*[۰-۹0-9]{1,2}",
-            line
-        ):
-            data["ساعت کاری"] = line
-            break
-
-    # -------------------------
-    # بیمه
-    # -------------------------
-
-    for i, line in enumerate(lines):
-
-        line = clean_text(line)
-
-        if line == "بیمه":
-
-            if i + 1 < len(lines):
-
-                value = clean_text(lines[i + 1])
-
-                if value in ["دارد", "ندارد"]:
-                    data["بیمه"] = value
-
-    return data
-
-
-# =========================
-# توضیحات واقعی
-# =========================
-
-def extract_description(page):
-
-    bad_words = [
-        "برو به اطلاعات تماس",
-        "انتخاب شهر",
-        "دیوار من",
-        "چت و تماس",
-        "پشتیبانی",
-        "ثبت آگهی",
-        "گزارش آگهی",
-        "دربارهٔ دیوار",
-        "درباره دیوار",
-        "تصویر 1 از",
-        "تصویر 2 از",
-        "تصویر 3 از",
-        "تصویر 4 از",
-        "تصویر 5 از",
-        "اطلاعات تماس",
-        "سایر ویژگی ها و امکانات",
-        "سایر ویژگی‌ها و امکانات"
-    ]
-
-    selectors = [
-        '[data-testid="description"]',
-        '[data-testid*="description"]',
-        '[class*="description"]'
-    ]
-
-    for selector in selectors:
-
-        try:
-
-            elements = page.locator(selector).all()
-
-            for element in elements:
-
-                try:
-
-                    text = element.inner_text()
-                    text = clean_text(text)
-
-                    if len(text) < 15:
-                        continue
-
-                    if any(
-                        bad.lower() in text.lower()
-                        for bad in bad_words
-                    ):
-                        continue
-
-                    return text
-
-                except Exception:
-                    continue
-
-        except Exception:
-            continue
-
-    return ""
-
-
-# =========================
-# دریافت اطلاعات آگهی
-# =========================
-
-def get_ad_details(page, url):
-
-    print(f"🔎 باز کردن آگهی: {url}")
-
-    page.goto(
-        url,
-        wait_until="domcontentloaded",
-        timeout=60000
+    return any(
+        x in value
+        for x in valid
     )
 
-    page.wait_for_timeout(3000)
+
+# =========================
+# اعتبارسنجی سابقه کار
+# =========================
+
+def valid_experience(value):
+
+    if not value:
+        return False
+
+    value = value.strip()
+
+    keywords = [
+
+        "بدون نیاز",
+        "بدون سابقه",
+        "کمتر از",
+        "حداقل",
+        "بیش از",
+        "سال سابقه",
+        "ماه سابقه",
+
+    ]
+
+    return any(
+        x in value
+        for x in keywords
+    )
+
+
+# =========================
+# اعتبارسنجی ساعت کاری
+# =========================
+
+def valid_work_hours(value):
+
+    if not value:
+        return False
+
+    value = value.strip()
+
+    # باید چیزی شبیه ساعت باشد
+    patterns = [
+
+        r"\b\d{1,2}\s*(?:تا|-)\s*\d{1,2}\b",
+
+        r"\b\d{1,2}:\d{2}\s*(?:تا|-)\s*\d{1,2}:\d{2}\b",
+
+        r"\bاز\s+\d{1,2}",
+
+        r"\bساعت\s+\d{1,2}",
+
+    ]
+
+    return any(
+        re.search(
+            pattern,
+            value
+        )
+        for pattern in patterns
+    )
+
+
+# =========================
+# استخراج سن
+# =========================
+
+def extract_age(text):
+
+    if not text:
+        return None
+
+    patterns = [
+
+        r"(?:سن|سنین)\s*(?:از)?\s*(\d{1,2})\s*(?:تا|-)\s*(\d{1,2})\s*سال",
+
+        r"(\d{1,2})\s*(?:تا|-)\s*(\d{1,2})\s*سال",
+
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text
+        )
+
+        if match:
+
+            return (
+                f"{match.group(1)} تا "
+                f"{match.group(2)} سال"
+            )
+
+    return None
+
+
+# =========================
+# استخراج حقوق
+# =========================
+
+def extract_salary(text):
+
+    if not text:
+        return None
+
+    text = clean_text(text)
+
+    patterns = [
+
+        r"از\s+[\d۰-۹,.]+\s+تا\s+[\d۰-۹,.]+\s+میلیون\s+تومان",
+
+        r"[\d۰-۹,.]+\s+تا\s+[\d۰-۹,.]+\s+میلیون\s+تومان",
+
+        r"حداقل\s+[\d۰-۹,.]+\s+میلیون\s+تومان",
+
+        r"حداکثر\s+[\d۰-۹,.]+\s+میلیون\s+تومان",
+
+        r"تا\s+[\d۰-۹,.]+\s+میلیون\s+تومان",
+
+        r"از\s+[\d۰-۹,.]+\s+میلیون\s+تومان",
+
+        r"[\d۰-۹,.]+\s+میلیون\s+تومان",
+
+        r"توافقی",
+
+    ]
+
+    for pattern in patterns:
+
+        match = re.search(
+            pattern,
+            text
+        )
+
+        if match:
+
+            result = match.group(0)
+
+            # اگر متن بعد از حقوق دارد،
+            # فقط خود بخش حقوق را برگردان
+            result = result.strip()
+
+            return result
+
+    return None
+
+
+# =========================
+# استخراج اطلاعات آگهی
+# =========================
+
+def extract_ad(page, url):
+
+    ad_id = get_ad_id(url)
+
+    print(f"\n🔎 بررسی آگهی: {ad_id}")
+
+    try:
+
+        page.goto(
+            url,
+            wait_until="domcontentloaded",
+            timeout=30000
+        )
+
+        page.wait_for_timeout(2500)
+
+    except Exception as e:
+
+        print(
+            f"❌ خطا در باز کردن آگهی: {e}"
+        )
+
+        return None
 
     # -------------------------
     # عنوان
@@ -470,319 +537,581 @@ def get_ad_details(page, url):
 
     title = ""
 
-    for selector in [
+    selectors = [
+
         "h1",
-        '[data-testid="title"]'
-    ]:
+
+        '[data-testid="ad-title"]',
+
+        '[data-testid="title"]',
+
+    ]
+
+    for selector in selectors:
 
         try:
 
-            value = page.locator(selector).first.inner_text()
+            loc = page.locator(selector)
 
-            if value:
-                title = clean_text(value)
-                break
+            if loc.count() > 0:
+
+                value = clean_text(
+                    loc.first.inner_text()
+                )
+
+                if value:
+
+                    title = value
+                    break
 
         except Exception:
-            continue
-
-    if not title:
-        title = "آگهی استخدام"
+            pass
 
     # -------------------------
-    # فیلدهای ساختاریافته
+    # اطلاعات ساختاریافته
     # -------------------------
 
-    structured = extract_structured_fields(page)
+    info = get_structured_info(page)
 
-    print(f"📊 تعداد فیلدهای ساختاریافته: {len(structured)}")
-    print(f"📌 عنوان: {title}")
-    print(f"📋 فیلدهای ساختاریافته: {structured}")
+    print("📊 اطلاعات ساختاریافته:")
+
+    print(info)
 
     # -------------------------
     # متن صفحه
     # -------------------------
 
+    body_text = ""
+
     try:
-        body = page.locator("body").inner_text()
+
+        article = page.locator("article")
+
+        if article.count() > 0:
+
+            body_text = article.first.inner_text()
+
+        else:
+
+            body_text = page.locator(
+                "body"
+            ).inner_text()
+
     except Exception:
-        body = ""
 
-    lines = [
-        clean_text(x)
-        for x in body.splitlines()
-        if clean_text(x)
-    ]
+        try:
 
-    fallback = extract_fallback_fields(lines)
+            body_text = page.locator(
+                "body"
+            ).inner_text()
 
-    data = {}
+        except Exception:
+
+            body_text = ""
+
+    body_text = clean_text(body_text)
 
     # -------------------------
-    # عنوان شغلی
+    # اگر عنوان پیدا نشد
     # -------------------------
 
-    if structured.get("عنوان شغلی"):
-        data["عنوان شغلی"] = structured["عنوان شغلی"]
+    if not title:
+
+        lines = [
+            clean_text(x)
+            for x in body_text.split("\n")
+            if clean_text(x)
+        ]
+
+        for line in lines:
+
+            if len(line) >= 4:
+
+                if line not in [
+                    "استخدام و کاریابی",
+                    "استخدام",
+                    "کاریابی",
+                ]:
+
+                    title = line
+                    break
 
     # -------------------------
     # جنسیت
     # -------------------------
 
-    if structured.get("جنسیت"):
-        data["جنسیت"] = structured["جنسیت"]
+    gender = info.get("جنسیت")
 
-    elif fallback.get("جنسیت"):
-        data["جنسیت"] = fallback["جنسیت"]
+    if gender:
+
+        gender = gender.strip()
 
     # -------------------------
-    # سابقه
+    # سابقه کار
     # -------------------------
 
-    valid_experience = [
-        "بدون نیاز به سابقه",
-        "کمتر از ۱ سال",
-        "کم‌تر از ۱ سال",
-        "کمتر از 1 سال",
-        "کم‌تر از 1 سال",
-        "حداقل ۱ سال",
-        "حداقل 1 سال",
-        "حداقل ۲ سال",
-        "حداقل 2 سال",
-        "حداقل ۳ سال",
-        "حداقل 3 سال",
-        "حداقل ۴ سال",
-        "حداقل 4 سال",
-        "حداقل ۵ سال",
-        "حداقل 5 سال"
-    ]
+    experience = None
 
-    structured_experience = structured.get("سابقه کار")
+    for key, value in info.items():
 
-    if structured_experience in valid_experience:
-        data["سابقه کار"] = structured_experience
+        if "سابقه" in key:
 
-    elif fallback.get("سابقه کار"):
-        data["سابقه کار"] = fallback["سابقه کار"]
+            if valid_experience(value):
+
+                experience = value
+
+            break
 
     # -------------------------
     # نوع همکاری
     # -------------------------
 
-    valid_cooperation = [
-        "تمام وقت",
-        "پاره وقت",
-        "دورکاری",
-        "کارآموزی",
-        "پروژه‌ای",
-        "پروژه ای"
-    ]
+    cooperation = None
 
-    structured_cooperation = structured.get("نوع همکاری")
+    for key, value in info.items():
 
-    if structured_cooperation in valid_cooperation:
-        data["نوع همکاری"] = structured_cooperation
+        if "نوع همکاری" in key:
 
-    elif fallback.get("نوع همکاری"):
-        data["نوع همکاری"] = fallback["نوع همکاری"]
+            if valid_cooperation(value):
+
+                cooperation = value
+
+            break
 
     # -------------------------
     # ساعت کاری
     # -------------------------
 
-    structured_time = structured.get("ساعت کاری")
+    work_hours = None
 
-    if structured_time and re.search(
-        r"\d+\s*تا\s*\d+|[۰-۹]+\s*تا\s*[۰-۹]+",
-        structured_time
-    ):
+    for key, value in info.items():
 
-        if "تومان" not in structured_time:
-            data["ساعت کاری"] = structured_time
+        if "ساعت کاری" in key:
 
-    elif fallback.get("ساعت کاری"):
+            if valid_work_hours(value):
 
-        data["ساعت کاری"] = fallback["ساعت کاری"]
+                work_hours = value
+
+            break
 
     # -------------------------
     # حقوق
     # -------------------------
 
-    if structured.get("دستمزد"):
-        data["حقوق"] = structured["دستمزد"]
+    salary = None
 
-    elif fallback.get("حقوق"):
-        data["حقوق"] = fallback["حقوق"]
+    for key, value in info.items():
+
+        if "دستمزد" in key or "حقوق" in key:
+
+            salary = extract_salary(value)
+
+            if salary:
+                break
+
+    # اگر از اطلاعات ساختاریافته پیدا نشد
+    if not salary:
+
+        salary = extract_salary(
+            body_text
+        )
 
     # -------------------------
     # پرداخت
     # -------------------------
 
-    if structured.get("شیوهٔ پرداخت"):
-        data["پرداخت"] = structured["شیوهٔ پرداخت"]
+    payment = None
 
-    elif fallback.get("پرداخت"):
-        data["پرداخت"] = fallback["پرداخت"]
+    for key, value in info.items():
+
+        if "پرداخت" in key:
+
+            payment = value.strip()
+
+            break
 
     # -------------------------
     # بیمه
     # -------------------------
 
-    if structured.get("بیمه"):
-        data["بیمه"] = structured["بیمه"]
+    insurance = None
 
-    elif fallback.get("بیمه"):
-        data["بیمه"] = fallback["بیمه"]
+    for key, value in info.items():
+
+        if "بیمه" in key:
+
+            insurance = value.strip()
+
+            break
+
+    # -------------------------
+    # سن
+    # -------------------------
+
+    age = extract_age(
+        body_text
+    )
 
     # -------------------------
     # دورکاری
     # -------------------------
 
-    if structured.get("امکان دورکاری"):
-        data["امکان دورکاری"] = structured["امکان دورکاری"]
+    remote = None
+
+    remote_keywords = [
+        "دورکاری",
+        "امکان دورکاری",
+        "کار در منزل",
+        "کاردرمنزل",
+    ]
+
+    for keyword in remote_keywords:
+
+        if keyword in body_text:
+
+            remote = "دارد"
+            break
 
     # -------------------------
-    # توضیحات
+    # ساخت دیکشنری
     # -------------------------
 
-    description = extract_description(page)
+    ad = {
 
-    return {
+        "id": ad_id,
+
+        "url": url,
+
         "title": title,
-        "fields": data,
-        "description": description
+
+        "gender": gender,
+
+        "age": age,
+
+        "experience": experience,
+
+        "cooperation": cooperation,
+
+        "work_hours": work_hours,
+
+        "salary": salary,
+
+        "payment": payment,
+
+        "insurance": insurance,
+
+        "remote": remote,
+
+        "description": body_text,
+
     }
+
+    return ad
 
 
 # =========================
-# ساخت پست
+# حذف خطوط مزاحم از توضیحات
+# =========================
+
+def clean_description(text, title):
+
+    if not text:
+        return ""
+
+    lines = [
+        clean_text(x)
+        for x in text.split("\n")
+        if clean_text(x)
+    ]
+
+    blacklist = [
+
+        "دیوار",
+        "ورود",
+        "ثبت آگهی",
+        "دسته‌بندی",
+        "استخدام و کاریابی",
+        "مشاهده همه",
+        "اشتراک‌گذاری",
+        "ذخیره",
+        "گزارش",
+        "ارتباط با آگهی‌دهنده",
+        "تماس",
+        "چت",
+        "آگهی‌های مشابه",
+        "آگهی‌های مرتبط",
+        "خانه",
+        "استان البرز",
+        "کرج",
+
+    ]
+
+    result = []
+
+    for line in lines:
+
+        if line == title:
+            continue
+
+        if len(line) < 2:
+            continue
+
+        # حذف خطوط رابط کاربری
+        if any(
+            item == line
+            for item in blacklist
+        ):
+            continue
+
+        result.append(line)
+
+    return "\n".join(result)
+
+
+# =========================
+# ساخت پست تلگرام
 # =========================
 
 def make_post(ad):
 
-    title = ad["title"]
-    data = ad["fields"]
-    description = ad["description"]
+    title = ad.get("title") or "استخدام نیرو"
 
-    # عنوان
-    heading = title
+    # -------------------------
+    # تیتر
+    # -------------------------
 
-    if data.get("حقوق"):
-        heading += f" | حقوق {data['حقوق']}"
+    post = []
 
-    lines = [
-        f"# 🟢 {heading}",
-        ""
-    ]
+    post.append(
+        f"# 🟢 {title}"
+    )
 
-    # ترتیب نمایش
-    ordered_fields = [
-        ("عنوان شغلی", "عنوان شغلی"),
-        ("جنسیت", "جنسیت"),
-        ("سابقه کار", "سابقه کار"),
-        ("نوع همکاری", "نوع همکاری"),
-        ("ساعت کاری", "ساعت کاری"),
-        ("حقوق", "حقوق"),
-        ("پرداخت", "پرداخت"),
-        ("بیمه", "بیمه"),
-        ("امکان دورکاری", "امکان دورکاری")
-    ]
+    post.append("")
 
-    for key, label in ordered_fields:
+    # -------------------------
+    # اطلاعات
+    # -------------------------
 
-        value = data.get(key)
+    if ad.get("title"):
 
-        if not value:
-            continue
-
-        lines.append(
-            f"🟢 {label}: {value}"
+        post.append(
+            f"🟢 عنوان شغلی: {ad['title']}"
         )
 
+    if ad.get("gender"):
+
+        post.append(
+            f"🟢 جنسیت: {ad['gender']}"
+        )
+
+    if ad.get("age"):
+
+        post.append(
+            f"🟢 محدوده سنی: {ad['age']}"
+        )
+
+    if ad.get("experience"):
+
+        post.append(
+            f"🟢 سابقه کار: {ad['experience']}"
+        )
+
+    if ad.get("cooperation"):
+
+        post.append(
+            f"🟢 نوع همکاری: {ad['cooperation']}"
+        )
+
+    if ad.get("work_hours"):
+
+        post.append(
+            f"🟢 ساعت کاری: {ad['work_hours']}"
+        )
+
+    if ad.get("salary"):
+
+        post.append(
+            f"🟢 حقوق: {ad['salary']}"
+        )
+
+    if ad.get("payment"):
+
+        post.append(
+            f"🟢 پرداخت: {ad['payment']}"
+        )
+
+    if ad.get("insurance"):
+
+        post.append(
+            f"🟢 بیمه: {ad['insurance']}"
+        )
+
+    if ad.get("remote"):
+
+        post.append(
+            f"🟢 امکان دورکاری: {ad['remote']}"
+        )
+
+    # -------------------------
     # توضیحات
+    # -------------------------
+
+    description = clean_description(
+        ad.get("description", ""),
+        title
+    )
+
     if description:
 
-        lines.append("")
-        lines.append("### 🟢 توضیحات")
+        # حذف خطوطی که قبلاً
+        # به صورت فیلد استفاده شده‌اند
 
-        description_lines = [
-            clean_text(x)
-            for x in description.splitlines()
-            if clean_text(x)
-        ]
+        used_values = set()
 
-        for line in description_lines:
+        for value in [
+            ad.get("gender"),
+            ad.get("age"),
+            ad.get("experience"),
+            ad.get("cooperation"),
+            ad.get("work_hours"),
+            ad.get("salary"),
+            ad.get("payment"),
+            ad.get("insurance"),
+        ]:
 
-            if any(
-                bad.lower() in line.lower()
-                for bad in [
-                    "برو به اطلاعات تماس",
-                    "انتخاب شهر",
-                    "دیوار من",
-                    "چت و تماس",
-                    "پشتیبانی",
-                    "ثبت آگهی",
-                    "گزارش آگهی",
-                    "دربارهٔ دیوار",
-                    "درباره دیوار",
-                    "تصویر "
-                ]
-            ):
+            if value:
+                used_values.add(
+                    clean_text(value)
+                )
+
+        description_lines = []
+
+        for line in description.split("\n"):
+
+            line = clean_text(line)
+
+            if not line:
                 continue
 
-            lines.append(
-                f"🟢 {line}"
+            if line in used_values:
+                continue
+
+            # حذف بعضی متن‌های تکراری UI
+            if line.startswith("دقایقی پیش"):
+                continue
+
+            if line.startswith("ساعتی پیش"):
+                continue
+
+            if line.startswith("امروز"):
+                continue
+
+            description_lines.append(line)
+
+        if description_lines:
+
+            post.append("")
+
+            post.append(
+                "### 🟢 توضیحات"
             )
 
+            post.append("")
+
+            for line in description_lines:
+
+                post.append(
+                    f"🟢 {line}"
+                )
+
+    # -------------------------
     # آیدی‌های ثابت
-    lines.extend([
-        "",
-        "کانال تلگرام",
-        "@karyabi_alborzi",
-        "",
-        "جهت ثبت آگهی",
+    # -------------------------
+
+    post.append("")
+
+    post.append(
+        "کانال تلگرام"
+    )
+
+    post.append(
+        "@karyabi_alborzi"
+    )
+
+    post.append("")
+
+    post.append(
+        "جهت ثبت آگهی"
+    )
+
+    post.append(
         "@Karyabi_karaji"
-    ])
+    )
 
-    return "\n".join(lines)
+    return "\n".join(post)
 
 
 # =========================
-# ارسال تلگرام
+# ارسال به تلگرام
 # =========================
 
-def send_telegram(message):
+def send_telegram(text):
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    if not BOT_TOKEN:
 
-    payload = {
+        print(
+            "❌ BOT_TOKEN پیدا نشد."
+        )
+
+        return False
+
+    url = (
+        f"https://api.telegram.org/bot"
+        f"{BOT_TOKEN}/sendMessage"
+    )
+
+    data = {
+
         "chat_id": CHAT_ID,
-        "text": message,
-        "disable_web_page_preview": True
+
+        "text": text,
+
+        "disable_web_page_preview": True,
+
     }
 
     try:
 
         response = requests.post(
             url,
-            json=payload,
+            data=data,
             timeout=30
         )
 
         if response.status_code == 200:
-            print("📨 پیام با موفقیت به تلگرام ارسال شد.")
-            return True
 
-        print("❌ خطا در ارسال تلگرام:")
-        print(response.text)
+            result = response.json()
 
-        return False
+            if result.get("ok"):
+
+                print(
+                    "✅ پیام با موفقیت ارسال شد."
+                )
+
+                return True
+
+        print(
+            "❌ خطا در ارسال تلگرام:",
+            response.text
+        )
 
     except Exception as e:
 
-        print(f"❌ خطای ارتباط با تلگرام: {e}")
+        print(
+            f"❌ خطای Telegram API: {e}"
+        )
 
-        return False
+    return False
 
 
 # =========================
@@ -791,15 +1120,73 @@ def send_telegram(message):
 
 def main():
 
-    print("\n🚀 شروع ربات\n")
+    print("🚀 شروع ربات")
 
     if not BOT_TOKEN:
-        print("❌ BOT_TOKEN پیدا نشد.")
+
+        print(
+            "❌ BOT_TOKEN تنظیم نشده!"
+        )
+
         return
 
     seen = load_seen()
 
-    print(f"📦 تعداد آگهی‌های قبلی: {len(seen)}\n")
+    print(
+        f"📦 تعداد آگهی‌های قبلی: {len(seen)}"
+    )
+
+    # -------------------------
+    # دریافت لیست
+    # -------------------------
+
+    urls = get_listing_urls()
+
+    if not urls:
+
+        print(
+            "❌ هیچ آگهی‌ای پیدا نشد."
+        )
+
+        return
+
+    # -------------------------
+    # حذف آگهی‌های قبلی
+    # -------------------------
+
+    new_urls = []
+
+    for url in urls:
+
+        ad_id = get_ad_id(url)
+
+        if not ad_id:
+            continue
+
+        if ad_id in seen:
+            continue
+
+        new_urls.append(url)
+
+    print(
+        f"🆕 آگهی جدید پیدا شده: "
+        f"{len(new_urls)}"
+    )
+
+    # فقط ۱۰ آگهی
+    new_urls = new_urls[:10]
+
+    if not new_urls:
+
+        print(
+            "ℹ️ آگهی جدیدی برای ارسال وجود ندارد."
+        )
+
+        return
+
+    # -------------------------
+    # Playwright
+    # -------------------------
 
     with sync_playwright() as p:
 
@@ -807,76 +1194,93 @@ def main():
             headless=True
         )
 
-        page = browser.new_page(
+        context = browser.new_context(
+            user_agent=DIVAR_HEADERS[
+                "User-Agent"
+            ],
+            locale="fa-IR",
             viewport={
-                "width": 1280,
+                "width": 1366,
                 "height": 900
-            },
-            locale="fa-IR"
+            }
         )
 
-        # گرفتن آگهی‌ها
-        urls = get_listing_urls(page)
+        page = context.new_page()
 
-        new_ads = []
+        # -------------------------
+        # پردازش ۱۰ آگهی
+        # -------------------------
 
-        for url in urls:
+        for index, url in enumerate(
+            new_urls,
+            start=1
+        ):
 
-            ad_id = get_ad_id(url)
-
-            if not ad_id:
-                continue
-
-            if ad_id in seen:
-                continue
-
-            new_ads.append(
-                (ad_id, url)
+            print(
+                f"\n=============================="
             )
 
-            if len(new_ads) >= MAX_ADS:
-                break
+            print(
+                f"📌 آگهی {index}/{len(new_urls)}"
+            )
 
-        print(
-            f"🆕 آگهی جدید پیدا شده: "
-            f"{len(new_ads)}\n"
-        )
-
-        # پردازش
-        for ad_id, url in new_ads:
+            print(url)
 
             try:
 
-                ad = get_ad_details(
+                ad = extract_ad(
                     page,
                     url
                 )
 
-                post = make_post(ad)
-
-                print("\n" + "=" * 50)
-                print(post)
-                print("=" * 50 + "\n")
-
-                sent = send_telegram(post)
-
-                if sent:
-
-                    if ad_id not in seen:
-                        seen.append(ad_id)
-
-                    save_seen(seen)
+                if not ad:
 
                     print(
-                        f"✅ ارسال شد: "
-                        f"{ad['title']}\n"
+                        "❌ استخراج آگهی ناموفق بود."
                     )
+
+                    continue
+
+                print(
+                    f"📝 عنوان: {ad['title']}"
+                )
+
+                post = make_post(ad)
+
+                print(
+                    "\n----- متن نهایی -----\n"
+                )
+
+                print(post)
+
+                print(
+                    "\n---------------------\n"
+                )
+
+                # -------------------------
+                # ارسال
+                # -------------------------
+
+                success = send_telegram(
+                    post
+                )
+
+                if success:
+
+                    ad_id = ad["id"]
+
+                    if ad_id:
+
+                        seen.add(ad_id)
+
+                    # کمی فاصله بین ارسال‌ها
+                    time.sleep(2)
 
                 else:
 
                     print(
-                        f"⚠️ ارسال نشد و ذخیره نشد: "
-                        f"{ad['title']}\n"
+                        "⚠️ پیام ارسال نشد؛ "
+                        "این آگهی seen نمی‌شود."
                     )
 
             except Exception as e:
@@ -887,8 +1291,20 @@ def main():
 
         browser.close()
 
-    print("🏁 پایان اجرای ربات")
+    # -------------------------
+    # ذخیره
+    # -------------------------
 
+    save_seen(seen)
+
+    print(
+        "\n🏁 پایان اجرای ربات"
+    )
+
+
+# =========================
+# Start
+# =========================
 
 if __name__ == "__main__":
     main()
