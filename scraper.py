@@ -3,7 +3,6 @@ import json
 import re
 import requests
 from bs4 import BeautifulSoup
-from telegram import Bot
 from playwright.sync_api import sync_playwright
 
 
@@ -62,12 +61,14 @@ def get_listing_urls():
         for a in soup.find_all("a", href=True):
             href = a["href"]
 
-            if "/v/" in href:
-                if href.startswith("/"):
-                    href = "https://divar.ir" + href
+            if "/v/" not in href:
+                continue
 
-                if href not in urls:
-                    urls.append(href)
+            if href.startswith("/"):
+                href = "https://divar.ir" + href
+
+            if href not in urls:
+                urls.append(href)
 
         print(f"📋 تعداد آگهی‌های صفحه: {len(urls)}")
 
@@ -98,7 +99,7 @@ def get_ad_details(page, url):
 
         count = rows.count()
 
-        print(f"📊 تعداد فیلدهای آگهی: {count}")
+        print(f"📊 تعداد فیلدهای ساختاریافته: {count}")
 
         for i in range(count):
             try:
@@ -118,6 +119,7 @@ def get_ad_details(page, url):
             except Exception as e:
                 print(f"⚠️ خطا در خواندن فیلد {i}: {e}")
 
+        # عنوان آگهی
         title = fields.get("عنوان شغلی", "")
 
         if not title:
@@ -126,14 +128,14 @@ def get_ad_details(page, url):
             except Exception:
                 title = ""
 
-        # متن کامل صفحه برای پیدا کردن توضیحات
+        # متن کامل صفحه
         try:
             body_text = page.locator("body").inner_text()
         except Exception:
             body_text = ""
 
         print(f"📌 عنوان: {title}")
-        print(f"📋 فیلدها: {fields}")
+        print(f"📋 فیلدهای ساختاریافته: {fields}")
 
         return {
             "title": title,
@@ -155,19 +157,163 @@ def clean_text(text):
     if not text:
         return ""
 
-    text = re.sub(r"\n{3,}", "\n\n", text)
-
+    text = re.sub(r"\s+", " ", text)
     return text.strip()
 
 
+def extract_extra_fields(details):
+    """
+    بعضی آگهی‌های دیوار اطلاعات استخدامی را
+    در unexpandable-info-row ندارند و فقط داخل متن صفحه نمایش می‌دهند.
+    """
+
+    fields = details["fields"].copy()
+    text = details.get("description", "")
+
+    lines = [
+        clean_text(line)
+        for line in text.splitlines()
+        if clean_text(line)
+    ]
+
+    # کلمات و متن‌های غیرمرتبط که در body صفحه دیوار دیده می‌شوند
+    ignored = {
+        "برو به اطلاعات تماس",
+        "انتخاب شهر",
+        "دسته‌ها",
+        "دیوار من",
+        "چت و تماس",
+        "پشتیبانی",
+        "ثبت آگهی",
+        "اطلاعات تماس",
+        "چت",
+        "تماس ناشناس",
+        "زنگ خطرهای قبل از همکاری",
+        "سایر ویژگی‌ها و امکانات",
+        "وضعیت سربازی",
+        "ساعت کاری",
+        "توضیحات",
+    }
+
+    useful = []
+
+    for line in lines:
+        if line in ignored:
+            continue
+
+        if len(line) < 2:
+            continue
+
+        useful.append(line)
+
+    # پیدا کردن اطلاعاتی که دیوار معمولاً در متن صفحه نشان می‌دهد
+    for i, line in enumerate(useful):
+
+        # سابقه
+        if line == "سابقه" and i + 1 < len(useful):
+            value = useful[i + 1]
+
+            if "سابقه کار" not in fields:
+                fields["سابقه کار"] = value
+
+        # نوع همکاری
+        if line in {
+            "تمام وقت",
+            "پاره وقت",
+            "پروژه‌ای",
+            "دورکاری",
+            "تمام‌وقت",
+            "پاره‌وقت",
+        }:
+            if "نوع همکاری" not in fields:
+                fields["نوع همکاری"] = line
+
+        # شیوه پرداخت
+        if line in {
+            "ماهانه",
+            "هفتگی",
+            "روزانه",
+            "ساعتی",
+            "توافقی",
+            "پورسانتی",
+        }:
+            if "شیوهٔ پرداخت" not in fields:
+                fields["شیوهٔ پرداخت"] = line
+
+        # عنوان شغلی
+        if line in {
+            "فروشنده",
+            "سالن کار و گارسون",
+            "طراح سایت",
+            "نیروی فنی و تولید",
+            "پذیرش و اطلاعات",
+            "باریستا",
+        }:
+            if "عنوان شغلی" not in fields:
+                fields["عنوان شغلی"] = line
+
+        # حقوق
+        if (
+            "میلیون تومان" in line
+            or "تومان" in line
+        ):
+            if (
+                "حقوق" not in fields
+                and "دستمزد" not in fields
+                and re.search(r"\d", line)
+            ):
+                fields["دستمزد"] = line
+
+        # جنسیت
+        if line in {
+            "آقا",
+            "خانم",
+            "فرقی نمی‌کند",
+            "فرقی نمی کند",
+        }:
+            if "جنسیت" not in fields:
+                fields["جنسیت"] = line
+
+    # سابقه با الگوهای رایج
+    for line in useful:
+
+        if re.search(
+            r"(حداقل|حداکثر|کم‌تر از|کمتر از)\s*\d+\s*سال",
+            line
+        ):
+            if "سابقه کار" not in fields:
+                fields["سابقه کار"] = line
+
+        # حقوق
+        if (
+            "میلیون تومان" in line
+            and re.search(r"\d", line)
+        ):
+            if (
+                "دستمزد" not in fields
+                and "حقوق" not in fields
+            ):
+                fields["دستمزد"] = line
+
+    return fields
+
+
 def make_post(details):
-    fields = details["fields"]
-    title = details["title"]
+    fields = extract_extra_fields(details)
+
+    title = fields.get(
+        "عنوان شغلی",
+        details.get("title", "")
+    )
 
     if not title:
         title = "استخدام نیروی کار"
 
-    salary = fields.get("دستمزد", "")
+    salary = fields.get(
+        "دستمزد",
+        fields.get("حقوق", "")
+    )
+
     gender = fields.get("جنسیت", "")
     experience = fields.get("سابقه کار", "")
     cooperation = fields.get("نوع همکاری", "")
@@ -185,39 +331,91 @@ def make_post(details):
     lines.append(headline)
     lines.append("")
 
-    # اطلاعات اصلی آگهی
-    lines.append(f"🟢 عنوان شغلی: {title}")
+    # اطلاعات اصلی
+    lines.append(
+        f"🟢 عنوان شغلی: {title}"
+    )
 
     if gender:
-        lines.append(f"🟢 جنسیت: {gender}")
+        lines.append(
+            f"🟢 جنسیت: {gender}"
+        )
 
     if experience:
-        lines.append(f"🟢 سابقه کار: {experience}")
+        lines.append(
+            f"🟢 سابقه کار: {experience}"
+        )
 
     if cooperation:
-        lines.append(f"🟢 نوع همکاری: {cooperation}")
+        lines.append(
+            f"🟢 نوع همکاری: {cooperation}"
+        )
 
     if payment:
-        lines.append(f"🟢 شیوه پرداخت: {payment}")
-
-    if insurance:
-        lines.append(f"🟢 بیمه: {insurance}")
+        lines.append(
+            f"🟢 پرداخت: {payment}"
+        )
 
     if salary:
-        lines.append(f"🟢 حقوق: {salary}")
+        lines.append(
+            f"🟢 حقوق: {salary}"
+        )
+
+    if insurance:
+        lines.append(
+            f"🟢 بیمه: {insurance}"
+        )
 
     lines.append("")
 
-    # توضیحات
-    description = details.get("description", "")
+    # توضیحات واقعی آگهی
+    description = details.get(
+        "description",
+        ""
+    )
+
+    raw_lines = [
+        clean_text(line)
+        for line in description.splitlines()
+        if clean_text(line)
+    ]
+
+    # مواردی که نباید داخل توضیحات بیایند
+    ignored_lines = {
+        "برو به اطلاعات تماس",
+        "انتخاب شهر",
+        "دسته‌ها",
+        "دیوار من",
+        "چت و تماس",
+        "پشتیبانی",
+        "ثبت آگهی",
+        "اطلاعات تماس",
+        "چت",
+        "تماس ناشناس",
+        "زنگ خطرهای قبل از همکاری",
+        "سایر ویژگی‌ها و امکانات",
+        "وضعیت سربازی",
+        "ساعت کاری",
+        "توضیحات",
+        "سابقه",
+        "ماهانه",
+        "هفتگی",
+        "روزانه",
+        "ساعتی",
+        "توافقی",
+        "تمام وقت",
+        "تمام‌وقت",
+        "پاره وقت",
+        "پاره‌وقت",
+        "آقا",
+        "خانم",
+        "فرقی نمی‌کند",
+        "فرقی نمی کند",
+    }
 
     description_lines = []
 
-    for line in description.splitlines():
-        line = line.strip()
-
-        if not line:
-            continue
+    for line in raw_lines:
 
         if line == title:
             continue
@@ -228,42 +426,49 @@ def make_post(details):
         if line in fields.values():
             continue
 
-        # حذف بعضی متن‌های مربوط به فیلدها
-        if line.startswith("شیوهٔ پرداخت"):
+        if line in ignored_lines:
             continue
 
-        if line.startswith("عنوان شغلی"):
+        # حذف دسته‌بندی‌ها و مسیرهای منوی دیوار
+        if line.startswith("استخدام و کاریابی"):
             continue
 
-        if line.startswith("دستمزد"):
+        if line.startswith("استخدام "):
             continue
 
-        if line.startswith("جنسیت"):
+        # حذف متن‌های هشدار خود دیوار
+        if "پیش از استخدام پول ندهید" in line:
             continue
 
-        if line.startswith("بیمه"):
+        if "پرداخت شما ممکن است" in line:
             continue
 
-        if line.startswith("سابقه کار"):
+        # حذف زمان/مکان آگهی
+        if re.search(
+            r"(دقایقی پیش|امروز|دیروز|\d+\s*روز پیش)\s+در\s+",
+            line
+        ):
             continue
 
-        if line.startswith("نوع همکاری"):
+        # جلوگیری از تکرار
+        if line in description_lines:
             continue
 
         description_lines.append(line)
 
+    # فقط چند خط اول توضیحات واقعی
     if description_lines:
+
         lines.append("### 🟢 توضیحات")
 
-        # جلوگیری از ارسال متن بسیار طولانی
-        for line in description_lines[:20]:
+        for line in description_lines[:12]:
             lines.append(
-                f"🟢 {clean_text(line)}"
+                f"🟢 {line}"
             )
 
         lines.append("")
 
-    # آیدی‌های ثابت کانال
+    # آیدی‌های ثابت
     lines.append("کانال تلگرام")
     lines.append("@karyabi_alborzi")
     lines.append("")
@@ -275,11 +480,41 @@ def make_post(details):
 
 
 def send_telegram(text):
-    bot = Bot(token=BOT_TOKEN)
+    """
+    ارسال مستقیم از Telegram Bot API
+    بدون استفاده از Bot.send_message async
+    """
 
-    bot.send_message(
-        chat_id=CHAT_ID,
-        text=text
+    url = (
+        f"https://api.telegram.org/"
+        f"bot{BOT_TOKEN}/sendMessage"
+    )
+
+    response = requests.post(
+        url,
+        data={
+            "chat_id": CHAT_ID,
+            "text": text,
+        },
+        timeout=30,
+    )
+
+    if response.status_code != 200:
+        raise Exception(
+            f"Telegram API error: "
+            f"{response.status_code} - "
+            f"{response.text}"
+        )
+
+    result = response.json()
+
+    if not result.get("ok"):
+        raise Exception(
+            f"Telegram API error: {result}"
+        )
+
+    print(
+        "📨 پیام با موفقیت به تلگرام ارسال شد."
     )
 
 
@@ -292,14 +527,16 @@ def main():
         f"📦 تعداد آگهی‌های قبلی: {len(seen)}"
     )
 
-    # دریافت آگهی‌های صفحه استخدام البرز
+    # دریافت لیست استخدام استان البرز
     listing_urls = get_listing_urls()
 
     if not listing_urls:
-        print("❌ هیچ آگهی‌ای پیدا نشد.")
+        print(
+            "❌ هیچ آگهی‌ای پیدا نشد."
+        )
         return
 
-    # پیدا کردن آگهی‌های جدید
+    # پیدا کردن ۱۰ آگهی جدید
     new_ads = []
 
     for url in listing_urls:
@@ -325,7 +562,8 @@ def main():
             break
 
     print(
-        f"🆕 آگهی جدید پیدا شده: {len(new_ads)}"
+        f"🆕 آگهی جدید پیدا شده: "
+        f"{len(new_ads)}"
     )
 
     if not new_ads:
@@ -334,7 +572,6 @@ def main():
         )
         return
 
-    # باز کردن Chromium
     with sync_playwright() as p:
 
         browser = p.chromium.launch(
@@ -360,14 +597,15 @@ def main():
                 url
             )
 
-            # اگر اطلاعات آگهی دریافت نشد،
-            # آن را seen نمی‌کنیم تا دوباره امتحان شود.
+            # اگر هیچ اطلاعاتی دریافت نشده،
+            # آگهی seen نمی‌شود.
             if (
                 not details["fields"]
                 and not details["description"]
             ):
                 print(
-                    f"⚠️ اطلاعات آگهی {ad_id} دریافت نشد."
+                    f"⚠️ اطلاعات آگهی "
+                    f"{ad_id} دریافت نشد."
                 )
                 continue
 
@@ -390,7 +628,10 @@ def main():
                     f"✅ ارسال شد: {ad_id}"
                 )
 
-                seen.append(ad_id)
+                # فقط بعد از ارسال موفق
+                # آگهی seen می‌شود.
+                if ad_id not in seen:
+                    seen.append(ad_id)
 
                 save_seen(seen)
 
