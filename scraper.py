@@ -1,4 +1,3 @@
-```python
 import os
 import re
 import json
@@ -43,24 +42,6 @@ def normalize_text(text):
     text = text.replace("\u200c", "")
     text = re.sub(r"[\W_]+", "", text, flags=re.UNICODE)
     return text
-
-
-def same_title(a, b):
-    a = normalize_text(a)
-    b = normalize_text(b)
-
-    if not a or not b:
-        return True
-
-    if a == b:
-        return True
-
-    shorter = min(a, b, key=len)
-
-    if len(shorter) >= 5 and (a in b or b in a):
-        return True
-
-    return False
 
 
 def get_ad_id(url):
@@ -123,10 +104,6 @@ def extract_structured(page):
 
 
 def get_real_description(page):
-    """
-    فقط متن واقعی توضیحات آگهی را استخراج می‌کند.
-    """
-
     text = get_page_text(page)
 
     if not text:
@@ -178,7 +155,6 @@ def get_real_description(page):
         ):
             break
 
-        # بخش‌های رابط کاربری دیوار
         if line in {
             "چت",
             "تماس",
@@ -212,13 +188,9 @@ def get_real_description(page):
     return clean
 
 
-def extract_fields(
-    structured,
-    description_lines
-):
+def extract_fields(structured, description_lines):
     fields = {}
 
-    # فقط اطلاعات ساختاریافته معتبر دیوار
     mapping = {
         "جنسیت": "جنسیت",
         "دستمزد": "حقوق",
@@ -235,10 +207,6 @@ def extract_fields(
             fields[target] = value
 
     text = "\n".join(description_lines)
-
-    # -----------------------------
-    # نوع همکاری
-    # -----------------------------
 
     if "نوع همکاری" not in fields:
 
@@ -257,10 +225,6 @@ def extract_fields(
                 fields["نوع همکاری"] = value
                 break
 
-    # -----------------------------
-    # سابقه کار
-    # -----------------------------
-
     if "سابقه کار" not in fields:
 
         patterns = [
@@ -278,14 +242,8 @@ def extract_fields(
             )
 
             if match:
-                fields["سابقه کار"] = (
-                    match.group(0)
-                )
+                fields["سابقه کار"] = match.group(0)
                 break
-
-    # -----------------------------
-    # محدوده سنی
-    # -----------------------------
 
     english_text = fa_to_en(text)
 
@@ -328,10 +286,6 @@ def extract_fields(
 
         break
 
-    # -----------------------------
-    # حقوق
-    # -----------------------------
-
     if "حقوق" not in fields:
 
         for line in description_lines:
@@ -342,7 +296,6 @@ def extract_fields(
             ):
                 continue
 
-            # فقط خطی که واقعاً عدد/توافقی حقوق دارد
             if re.search(
                 r"\d.*(?:میلیون|تومان)|توافقی",
                 fa_to_en(line)
@@ -350,16 +303,10 @@ def extract_fields(
                 fields["حقوق"] = line
                 break
 
-    # -----------------------------
-    # ساعت کاری
-    # -----------------------------
-
     if "ساعت کاری" not in fields:
 
         for line in description_lines:
 
-            # عبارت‌هایی مثل «یک ساعت ناهار»
-            # نباید ساعت کاری محسوب شوند.
             if re.search(
                 r"ناهار|شام|استراحت",
                 line
@@ -368,10 +315,6 @@ def extract_fields(
 
             english_line = fa_to_en(line)
 
-            # فقط بازه زمانی مثل:
-            # ۷ تا ۱۸
-            # 9 الی 21
-            # 12-24
             pattern = (
                 r"(?<!\d)"
                 r"\d{1,2}"
@@ -394,7 +337,6 @@ def extract_fields(
 
             if match:
 
-                # اگر خط درباره ساعت کاری است
                 if any(
                     x in line
                     for x in [
@@ -418,12 +360,10 @@ def build_post(
 ):
     output = []
 
-    # عنوان
     output.append(
         f"# 🟢 {title}"
     )
 
-    # فیلدها
     order = [
         "جنسیت",
         "محدوده سنی",
@@ -441,7 +381,6 @@ def build_post(
 
         if value:
 
-            # اگر حقوق از توضیحات با عبارت تکراری شروع شده
             if key == "حقوق":
 
                 value = re.sub(
@@ -454,20 +393,15 @@ def build_post(
                 f"🟢 {key}: {value}"
             )
 
-    # توضیحات
     if description_lines:
 
         output.append("")
-
         output.append(
             "### 🟢 توضیحات"
         )
 
         for line in description_lines:
 
-            # اگر خط دقیقاً همان حقوقی است
-            # که قبلاً به عنوان فیلد آمده،
-            # دوباره تکرارش نکن
             if fields.get("حقوق"):
 
                 normalized_line = normalize_text(
@@ -478,17 +412,13 @@ def build_post(
                     fields["حقوق"]
                 )
 
-                if (
-                    normalized_line
-                    == normalized_salary
-                ):
+                if normalized_line == normalized_salary:
                     continue
 
             output.append(
                 f"🟢 {line}"
             )
 
-    # انتهای آگهی
     output.extend([
         "",
         "کانال روبیکا",
@@ -731,7 +661,6 @@ def main():
 
                 print(structured)
 
-                # عنوان
                 title = ""
 
                 try:
@@ -758,18 +687,15 @@ def main():
                         ""
                     )
 
-                # توضیحات
                 description = (
                     get_real_description(page)
                 )
 
-                # فیلدها
                 fields = extract_fields(
                     structured,
                     description
                 )
 
-                # ساخت متن نهایی
                 post = build_post(
                     title,
                     fields,
@@ -783,7 +709,6 @@ def main():
 
                 print(post)
 
-                # ارسال
                 send_telegram(post)
 
                 seen.add(ad_id)
@@ -825,4 +750,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-```
