@@ -32,9 +32,13 @@ def en_to_fa(text):
     return str(text or "").translate(table)
 
 
+def clean_line(text):
+    return re.sub(r"\s+", " ", str(text or "")).strip()
+
+
 def normalize_text(text):
     text = fa_to_en(text or "").lower()
-    text = re.sub(r"[\u200c\u200d]", "", text)
+    text = text.replace("\u200c", "")
     text = re.sub(r"[\W_]+", "", text, flags=re.UNICODE)
     return text
 
@@ -55,10 +59,6 @@ def same_title(a, b):
         return True
 
     return False
-
-
-def clean_line(text):
-    return re.sub(r"\s+", " ", str(text or "")).strip()
 
 
 def get_ad_id(url):
@@ -83,46 +83,6 @@ def save_seen(seen):
         )
 
 
-def clean_description(text):
-    lines = []
-
-    ignored = {
-        "زنگ خطرهای قبل از همکاری",
-        "اطلاعات تماس",
-        "گزارش آگهی",
-        "یادداشت تنها برای شما قابل دیدن است و پس از حذف آگهی، پاک خواهد شد."
-    }
-
-    for raw in (text or "").splitlines():
-        line = clean_line(raw)
-
-        if not line:
-            continue
-
-        if line in ignored:
-            continue
-
-        if re.fullmatch(r"تصویر \d+ از \d+", line):
-            continue
-
-        lines.append(line)
-
-    cut_markers = {
-        "استخدام بازاریابی و فروش",
-        "استخدام مالی، حسابداری، حقوقی",
-        "استخدام صنعتی، فنی، مهندسی",
-        "استخدام خدمات فروشگاه و رستوران",
-        "استخدام اداری و مدیریت"
-    }
-
-    for i, line in enumerate(lines):
-        if line in cut_markers:
-            lines = lines[:i]
-            break
-
-    return lines
-
-
 def extract_structured(page):
     data = {}
 
@@ -136,8 +96,13 @@ def extract_structured(page):
             ps = row.locator("p")
 
             if ps.count() >= 2:
-                key = clean_line(ps.nth(0).inner_text())
-                value = clean_line(ps.nth(1).inner_text())
+                key = clean_line(
+                    ps.nth(0).inner_text()
+                )
+
+                value = clean_line(
+                    ps.nth(1).inner_text()
+                )
 
                 if key and value:
                     data[key] = value
@@ -148,42 +113,208 @@ def extract_structured(page):
     return data
 
 
-def get_ad_text(page):
+def get_page_text(page):
     try:
-        article = page.locator("article")
-
-        if article.count():
-            text = article.first.inner_text(timeout=5000)
-
-            if len(text.strip()) > 50:
-                return text
-
-    except Exception:
-        pass
-
-    try:
-        return page.locator("body").inner_text(timeout=5000)
+        return page.locator(
+            "body"
+        ).inner_text(timeout=5000)
     except Exception:
         return ""
 
 
-def extract_phones(page, body_text):
+def get_real_description(page, title):
+    """
+    فقط متن واقعی توضیحات آگهی را استخراج می‌کند
+    و اطلاعات رابط کاربری دیوار را حذف می‌کند.
+    """
+
+    text = get_page_text(page)
+
+    if not text:
+        return []
+
+    lines = []
+
+    # خطوطی که نباید وارد توضیحات شوند
+    ignored_exact = {
+        "چت",
+        "اطلاعات تماس",
+        "گزارش آگهی",
+        "یادداشت",
+        "سابقه",
+        "نوع همکاری",
+        "شیوهٔ پرداخت",
+        "عنوان شغلی",
+        "دستمزد",
+        "بیمه",
+        "جنسیت",
+        "وضعیت تاهل",
+        "وضعیت سربازی",
+        "سایر ویژگی‌ها و امکانات",
+        "توضیحات",
+        "۱"
+    }
+
+    ignored_contains = [
+        "زنگ خطرهای قبل از همکاری",
+        "یادداشت تنها برای شما",
+        "این آگهی را به دوستانتان",
+        "گزارش تخلف",
+        "اشتراک‌گذاری آگهی"
+    ]
+
+    # این خطوط مشخصاً متادیتای بالای صفحه هستند
+    metadata_patterns = [
+        r"^\d+\s*(دقیقه|دقیقه‌ای|ساعت|ساعت پیش|روز|روز پیش|هفته|ماه)\s*پیش",
+        r"^پریروز در ",
+        r"^دیروز در ",
+        r"^امروز در ",
+        r"^دقایقی پیش در ",
+        r"^لحظاتی پیش در ",
+        r"^در .+، .+$"
+    ]
+
+    raw_lines = text.splitlines()
+
+    # تشخیص شروع توضیحات واقعی
+    description_started = False
+
+    for raw in raw_lines:
+        line = clean_line(raw)
+
+        if not line:
+            continue
+
+        # حذف عنوان تکراری
+        if line == title:
+            continue
+
+        # حذف موارد کاملاً مشخص
+        if line in ignored_exact:
+            continue
+
+        # حذف UI
+        if any(
+            item in line
+            for item in ignored_contains
+        ):
+            continue
+
+        # حذف تصویر
+        if re.fullmatch(
+            r"تصویر\s+\d+\s+از\s+\d+",
+            line
+        ):
+            continue
+
+        # حذف متادیتای زمان/مکان
+        is_metadata = False
+
+        for pattern in metadata_patterns:
+            if re.search(
+                pattern,
+                line,
+                re.IGNORECASE
+            ):
+                is_metadata = True
+                break
+
+        if is_metadata:
+            continue
+
+        # اگر خط «توضیحات» بود، از بعد آن متن واقعی شروع می‌شود
+        if line == "توضیحات":
+            description_started = True
+            continue
+
+        # حذف عنوان‌های دسته‌بندی دیوار
+        if line.startswith("استخدام ") and (
+            "در " in line
+            or line in {
+                "استخدام رایانه و فناوری اطلاعات",
+                "استخدام مالی، حسابداری، حقوقی",
+                "استخدام اداری و مدیریت",
+                "استخدام صنعتی، فنی، مهندسی",
+                "استخدام خدمات فروشگاه و رستوران",
+                "استخدام بازاریابی و فروش"
+            }
+        ):
+            continue
+
+        lines.append(line)
+
+    # حذف متادیتای باقی‌مانده در ابتدای متن
+    while lines:
+        first = lines[0]
+
+        if first in ignored_exact:
+            lines.pop(0)
+            continue
+
+        if re.search(
+            r"^\d+\s*(دقیقه|ساعت|روز|هفته|ماه)",
+            first
+        ):
+            lines.pop(0)
+            continue
+
+        break
+
+    # حذف خطوط انتهایی مربوط به دسته‌بندی دیوار
+    cut_words = {
+        "استخدام سرایداری و نظافت",
+        "استخدام رایانه و فناوری اطلاعات",
+        "استخدام مالی، حسابداری، حقوقی",
+        "استخدام اداری و مدیریت",
+        "استخدام صنعتی، فنی، مهندسی",
+        "استخدام خدمات فروشگاه و رستوران",
+        "استخدام بازاریابی و فروش"
+    }
+
+    clean = []
+
+    for line in lines:
+        if line in cut_words:
+            break
+
+        clean.append(line)
+
+    # حذف تکراری‌های پشت سر هم
+    result = []
+
+    for line in clean:
+        if not result or result[-1] != line:
+            result.append(line)
+
+    return result
+
+
+def extract_phones(page):
     phones = []
 
     def add_phone(number):
         number = fa_to_en(number)
         number = re.sub(r"[^\d]", "", number)
 
-        if re.fullmatch(r"09\d{9}", number):
+        if re.fullmatch(
+            r"09\d{9}",
+            number
+        ):
             if number not in phones:
                 phones.append(number)
 
-    # 1. شماره‌های داخل لینک tel
+    # 1. لینک tel
     try:
-        links = page.locator('a[href^="tel:"]')
+        links = page.locator(
+            'a[href^="tel:"]'
+        )
 
         for i in range(links.count()):
-            href = links.nth(i).get_attribute("href") or ""
+            href = (
+                links.nth(i)
+                .get_attribute("href")
+                or ""
+            )
 
             for number in re.findall(
                 r"09[\d\s\-]{9,15}",
@@ -194,19 +325,29 @@ def extract_phones(page, body_text):
     except Exception:
         pass
 
-    # 2. شماره داخل متن قابل مشاهده
-    text = fa_to_en(body_text)
+    # 2. متن صفحه
+    try:
+        body = fa_to_en(
+            page.locator("body").inner_text(
+                timeout=5000
+            )
+        )
 
-    for number in re.findall(
-        r"(?<!\d)09[\d\s\-]{9,15}(?!\d)",
-        text
-    ):
-        add_phone(number)
+        for number in re.findall(
+            r"(?<!\d)09[\d\s\-]{9,15}(?!\d)",
+            body
+        ):
+            add_phone(number)
 
-    # 3. شماره احتمالی داخل HTML / JSON صفحه
+    except Exception:
+        pass
+
+    # 3. HTML / JSON
     if not phones:
         try:
-            html = fa_to_en(page.content())
+            html = fa_to_en(
+                page.content()
+            )
 
             for number in re.findall(
                 r"(?<!\d)09[\d\s\-]{9,15}(?!\d)",
@@ -217,14 +358,13 @@ def extract_phones(page, body_text):
         except Exception:
             pass
 
-    # 4. اگر شماره هنوز پیدا نشد، دکمه‌های تماس را امتحان کن
+    # 4. تلاش برای باز کردن شماره
     if not phones:
         buttons = [
-            "شماره تلفن",
             "نمایش شماره",
+            "شماره تلفن",
             "نمایش تلفن",
-            "اطلاعات تماس",
-            "تماس"
+            "اطلاعات تماس"
         ]
 
         for button_text in buttons:
@@ -235,16 +375,25 @@ def extract_phones(page, body_text):
                 )
 
                 if locator.count():
-                    locator.first.click(timeout=1500)
-                    page.wait_for_timeout(1000)
+                    locator.first.click(
+                        timeout=2000
+                    )
 
-                    new_text = page.locator(
-                        "body"
-                    ).inner_text(timeout=5000)
+                    page.wait_for_timeout(
+                        1000
+                    )
+
+                    body = fa_to_en(
+                        page.locator(
+                            "body"
+                        ).inner_text(
+                            timeout=5000
+                        )
+                    )
 
                     for number in re.findall(
-                        r"09[\d\s\-]{9,15}",
-                        fa_to_en(new_text)
+                        r"(?<!\d)09[\d\s\-]{9,15}(?!\d)",
+                        body
                     ):
                         add_phone(number)
 
@@ -254,21 +403,27 @@ def extract_phones(page, body_text):
             except Exception:
                 pass
 
-    return [en_to_fa(phone) for phone in phones]
+    return [
+        en_to_fa(phone)
+        for phone in phones
+    ]
 
 
-def extract_fields(structured, description_lines):
+def extract_fields(
+    structured,
+    description_lines
+):
     fields = {}
 
-    # اطلاعات ساختاریافته خود دیوار
+    # اطلاعات مستقیم دیوار
     if structured.get("جنسیت"):
         fields["جنسیت"] = structured["جنسیت"]
 
-    if structured.get("شیوهٔ پرداخت"):
-        fields["پرداخت"] = structured["شیوهٔ پرداخت"]
-
     if structured.get("دستمزد"):
         fields["حقوق"] = structured["دستمزد"]
+
+    if structured.get("شیوهٔ پرداخت"):
+        fields["پرداخت"] = structured["شیوهٔ پرداخت"]
 
     if structured.get("بیمه"):
         fields["بیمه"] = structured["بیمه"]
@@ -285,41 +440,47 @@ def extract_fields(structured, description_lines):
     if structured.get("سابقه کار"):
         fields["سابقه کار"] = structured["سابقه کار"]
 
-    text = "\n".join(description_lines)
+    text = "\n".join(
+        description_lines
+    )
 
     # نوع همکاری
     if "نوع همکاری" not in fields:
-        cooperation_patterns = [
+        cooperation = [
             "تمام وقت",
             "تمام‌وقت",
             "پاره وقت",
             "پاره‌وقت",
             "کارآموزی",
+            "دورکاری",
             "پروژه‌ای",
             "پروژه ای",
-            "دورکاری",
             "ساعتی"
         ]
 
-        for value in cooperation_patterns:
+        for value in cooperation:
             if value in text:
                 fields["نوع همکاری"] = value
                 break
 
-    # سابقه کار
+    # سابقه
     if "سابقه کار" not in fields:
         patterns = [
             r"بدون نیاز به سابقه",
             r"حداقل\s*[\d۰-۹]+\s*سال سابقه",
-            r"[\d۰-۹]+\s*سال سابقه",
-            r"کمتر از\s*[\d۰-۹]+\s*سال سابقه"
+            r"[\d۰-۹]+\s*سال سابقه"
         ]
 
         for pattern in patterns:
-            match = re.search(pattern, text, re.IGNORECASE)
+            match = re.search(
+                pattern,
+                text
+            )
 
             if match:
-                fields["سابقه کار"] = match.group(0)
+                fields["سابقه کار"] = (
+                    match.group(0)
+                )
                 break
 
     # سن
@@ -327,49 +488,31 @@ def extract_fields(structured, description_lines):
         english_text = fa_to_en(text)
 
         match = re.search(
-            r"(?:سن(?:ین)?|محدوده سنی|رده سنی)"
+            r"(?:سن(?:ین)?|محدوده سنی|شرایط سنی)"
             r"[^.\n]{0,30}"
-            r"(\d{1,2})\s*(?:تا|الی|-)\s*(\d{1,2})\s*سال",
+            r"(\d{1,2})\s*"
+            r"(?:تا|الی|-)\s*"
+            r"(\d{1,2})\s*سال",
             english_text,
             re.IGNORECASE
         )
 
         if match:
             fields["محدوده سنی"] = en_to_fa(
-                f"{match.group(1)} تا {match.group(2)} سال"
+                f"{match.group(1)} تا "
+                f"{match.group(2)} سال"
             )
 
-        else:
-            match = re.search(
-                r"(?:حداکثر سن|حداکثر)\s*(\d{1,2})\s*سال",
-                english_text,
-                re.IGNORECASE
-            )
-
-            if match:
-                fields["محدوده سنی"] = en_to_fa(
-                    f"حداکثر {match.group(1)} سال"
-                )
-
-    # جنسیت از متن
-    if "جنسیت" not in fields:
-        if re.search(r"فقط\s*(?:آقا|اقا|مرد)", text):
-            fields["جنسیت"] = "آقا"
-
-        elif re.search(r"فقط\s*(?:خانم|زن)", text):
-            fields["جنسیت"] = "خانم"
-
-    # حقوق از متن
+    # حقوق
     if "حقوق" not in fields:
         for line in description_lines:
             if re.search(
-                r"حقوق|دستمزد|درآمد|دریافتی|میانگین دریافتی",
+                r"حقوق|دستمزد|درآمد|دریافتی",
                 line
             ):
                 if re.search(
                     r"\d.*(?:میلیون|تومان)|توافقی",
-                    fa_to_en(line),
-                    re.IGNORECASE
+                    fa_to_en(line)
                 ):
                     fields["حقوق"] = line
                     break
@@ -379,7 +522,6 @@ def extract_fields(structured, description_lines):
         for line in description_lines:
             english_line = fa_to_en(line)
 
-            # جلوگیری از اشتباه گرفتن حقوق و سن با ساعت
             if any(
                 word in english_line
                 for word in [
@@ -393,21 +535,24 @@ def extract_fields(structured, description_lines):
             ):
                 continue
 
-            time_pattern = (
-                r"\b\d{1,2}(?::\d{2})?"
-                r"\s*(?:صبح|ظهر|بعدازظهر|عصر)?"
+            pattern = (
+                r"\b\d{1,2}"
+                r"(?::\d{2})?"
+                r"\s*(?:صبح|ظهر|عصر|بعدازظهر)?"
                 r"\s*(?:تا|الی|-)"
-                r"\s*"
-                r"\d{1,2}(?::\d{2})?"
+                r"\s*\d{1,2}"
+                r"(?::\d{2})?"
             )
 
-            if re.search(time_pattern, english_line):
+            if re.search(
+                pattern,
+                english_line
+            ):
                 if (
                     "ساعت" in line
                     or "صبح" in line
                     or "عصر" in line
                     or "الی" in line
-                    or ":" in line
                 ):
                     fields["ساعت کاری"] = line
                     break
@@ -415,22 +560,37 @@ def extract_fields(structured, description_lines):
     return fields
 
 
-def build_post(title, fields, description_lines, phones):
+def build_post(
+    title,
+    fields,
+    description_lines,
+    phones
+):
     output = []
 
-    # عنوان اصلی
-    output.append(f"# 🟢 {title}")
+    # عنوان
+    output.append(
+        f"# 🟢 {title}"
+    )
 
-    # جلوگیری از تکرار عنوان
-    job_title = fields.get("عنوان شغلی")
+    # عنوان شغلی فقط اگر تکراری نباشد
+    job_title = fields.get(
+        "عنوان شغلی"
+    )
 
-    if job_title and not same_title(title, job_title):
+    if (
+        job_title
+        and not same_title(
+            title,
+            job_title
+        )
+    ):
         output.append(
             f"🟢 عنوان شغلی: {job_title}"
         )
 
-    # ترتیب نمایش اطلاعات
-    field_order = [
+    # اطلاعات
+    order = [
         "جنسیت",
         "محدوده سنی",
         "سابقه کار",
@@ -441,7 +601,7 @@ def build_post(title, fields, description_lines, phones):
         "بیمه"
     ]
 
-    for key in field_order:
+    for key in order:
         value = fields.get(key)
 
         if value:
@@ -449,22 +609,28 @@ def build_post(title, fields, description_lines, phones):
                 f"🟢 {key}: {value}"
             )
 
-    # توضیحات
+    # توضیحات واقعی
     if description_lines:
         output.append("")
-        output.append("### 🟢 توضیحات")
+        output.append(
+            "### 🟢 توضیحات"
+        )
 
         for line in description_lines:
-            output.append(f"🟢 {line}")
+            output.append(
+                f"🟢 {line}"
+            )
 
     # شماره تماس
     if phones:
         output.append("")
 
         for phone in phones:
-            output.append(f"📞 {phone}")
+            output.append(
+                f"📞 {phone}"
+            )
 
-    # آیدی‌های ثابت کانال
+    # آیدی‌های ثابت
     output.extend([
         "",
         "کانال تلگرام",
@@ -478,14 +644,19 @@ def build_post(title, fields, description_lines, phones):
 
 
 def send_telegram(text):
-    token = os.getenv("BOT_TOKEN")
+    token = os.getenv(
+        "BOT_TOKEN"
+    )
 
     if not token:
         raise RuntimeError(
             "BOT_TOKEN تنظیم نشده است."
         )
 
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    url = (
+        "https://api.telegram.org/"
+        f"bot{token}/sendMessage"
+    )
 
     response = requests.post(
         url,
@@ -503,7 +674,9 @@ def send_telegram(text):
 
 
 def get_listing_urls():
-    print("🌐 دریافت لیست آگهی‌ها...")
+    print(
+        "🌐 دریافت لیست آگهی‌ها..."
+    )
 
     headers = {
         "User-Agent": UA,
@@ -511,8 +684,10 @@ def get_listing_urls():
             "text/html,application/xhtml+xml,"
             "application/xml;q=0.9,*/*;q=0.8"
         ),
-        "Accept-Language": "fa-IR,fa;q=0.9,en-US;q=0.8,en;q=0.7",
-        "Referer": "https://divar.ir/"
+        "Accept-Language":
+            "fa-IR,fa;q=0.9,en-US;q=0.8",
+        "Referer":
+            "https://divar.ir/"
     }
 
     try:
@@ -523,7 +698,8 @@ def get_listing_urls():
         )
 
         print(
-            f"🌐 Jobs page: HTTP {response.status_code}"
+            f"🌐 Jobs page: HTTP "
+            f"{response.status_code}"
         )
 
         if response.status_code != 200:
@@ -532,7 +708,9 @@ def get_listing_urls():
         html = response.text
 
     except Exception as e:
-        print(f"❌ خطا در دریافت لیست: {e}")
+        print(
+            f"❌ خطا در دریافت لیست: {e}"
+        )
         return []
 
     urls = []
@@ -544,35 +722,43 @@ def get_listing_urls():
 
     candidates = []
 
-    # لینک‌های معمولی
     for a in soup.find_all(
         "a",
         href=True
     ):
-        candidates.append(a["href"])
+        candidates.append(
+            a["href"]
+        )
 
-    # لینک‌های داخل HTML
     candidates += re.findall(
-        r'(?:https://divar\.ir)?/v/[^"\'<>\s]+',
+        r'(?:https://divar\.ir)?'
+        r'/v/[^"\'<>\s]+',
         html
     )
 
-    # نسخه escaped شده
     escaped = re.findall(
-        r'(?:https?:)?\\/\\/divar\.ir\\/v\\/[^"\'<>\s]+',
+        r'(?:https?:)?'
+        r'\\/\\/divar\.ir'
+        r'\\/v\\/[^"\'<>\s]+',
         html
     )
 
     candidates += [
-        item.replace("\\/", "/")
-        for item in escaped
+        x.replace("\\/", "/")
+        for x in escaped
     ]
 
     for href in candidates:
-        href = href.replace("\\/", "/")
+        href = href.replace(
+            "\\/",
+            "/"
+        )
 
         if href.startswith("/"):
-            href = "https://divar.ir" + href
+            href = (
+                "https://divar.ir"
+                + href
+            )
 
         if not href.startswith(
             "https://divar.ir/v/"
@@ -588,43 +774,49 @@ def get_listing_urls():
             continue
 
         if not any(
-            get_ad_id(existing) == ad_id
-            for existing in urls
+            get_ad_id(old) == ad_id
+            for old in urls
         ):
             urls.append(href)
 
     print(
-        f"📋 تعداد آگهی‌های صفحه: {len(urls)}"
+        f"📋 تعداد آگهی‌های صفحه: "
+        f"{len(urls)}"
     )
 
     return urls
 
 
 def main():
-    print("🚀 شروع ربات\n")
+    print(
+        "🚀 شروع ربات\n"
+    )
 
     seen = load_seen()
 
     print(
-        f"📦 تعداد آگهی‌های قبلی: {len(seen)}\n"
+        f"📦 تعداد آگهی‌های قبلی: "
+        f"{len(seen)}\n"
     )
 
-    listing_urls = get_listing_urls()
+    urls = get_listing_urls()
 
     new_ads = [
         url
-        for url in listing_urls
+        for url in urls
         if get_ad_id(url) not in seen
     ]
 
     print(
-        f"🆕 آگهی جدید پیدا شده: {len(new_ads)}"
+        f"🆕 آگهی جدید پیدا شده: "
+        f"{len(new_ads)}"
     )
 
     sent_count = 0
 
-    with sync_playwright() as playwright:
-        browser = playwright.chromium.launch(
+    with sync_playwright() as p:
+
+        browser = p.chromium.launch(
             headless=True
         )
 
@@ -660,10 +852,14 @@ def main():
                     timeout=30000
                 )
 
-                page.wait_for_timeout(1200)
+                page.wait_for_timeout(
+                    1500
+                )
 
                 # اطلاعات ساختاریافته
-                structured = extract_structured(page)
+                structured = (
+                    extract_structured(page)
+                )
 
                 print(
                     "📊 اطلاعات ساختاریافته:"
@@ -695,42 +891,36 @@ def main():
                         ""
                     )
 
-                # متن آگهی
-                raw_text = get_ad_text(page)
-
-                description = clean_description(
-                    raw_text
+                # توضیحات واقعی
+                description = (
+                    get_real_description(
+                        page,
+                        title
+                    )
                 )
 
-                # حذف عنوان تکراری از توضیحات
-                description = [
-                    line
-                    for line in description
-                    if line != title
-                ]
-
-                # استخراج شماره
+                # شماره
                 phones = extract_phones(
-                    page,
-                    raw_text
+                    page
                 )
 
                 if phones:
                     print(
-                        f"📞 شماره پیدا شد: {phones}"
+                        f"📞 شماره پیدا شد: "
+                        f"{phones}"
                     )
                 else:
                     print(
                         "📞 شماره تماس پیدا نشد."
                     )
 
-                # استخراج فیلدها
+                # فیلدها
                 fields = extract_fields(
                     structured,
                     description
                 )
 
-                # ساخت متن نهایی
+                # ساخت پست
                 post = build_post(
                     title,
                     fields,
@@ -744,10 +934,11 @@ def main():
 
                 print(post)
 
-                # ارسال تلگرام
+                # ارسال
                 send_telegram(post)
 
                 seen.add(ad_id)
+
                 sent_count += 1
 
                 print(
@@ -760,7 +951,8 @@ def main():
 
             except Exception as e:
                 print(
-                    f"❌ خطا در آگهی {ad_id}: {e}"
+                    f"❌ خطا در آگهی "
+                    f"{ad_id}: {e}"
                 )
 
         browser.close()
@@ -768,7 +960,8 @@ def main():
     save_seen(seen)
 
     print(
-        f"\n📨 تعداد آگهی ارسال‌شده: {sent_count}"
+        f"\n📨 تعداد آگهی ارسال‌شده: "
+        f"{sent_count}"
     )
 
     print(
