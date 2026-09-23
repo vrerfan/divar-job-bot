@@ -180,3 +180,5 @@ for ad in ads_to_send:
 
 print()
 print(f"💾 تعداد آگهی‌های ذخیره‌شده: {len(seen_ads)}")
+print("SEEN FILE:", os.path.abspath(SEEN_FILE))
+print("SEEN ADS:", seen_ads)
