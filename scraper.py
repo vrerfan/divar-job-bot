@@ -22,6 +22,7 @@ headers = {
     "User-Agent": "Mozilla/5.0"
 }
 
+# خواندن آگهی‌های قبلی
 if os.path.exists(SEEN_FILE):
     with open(SEEN_FILE, "r", encoding="utf-8") as f:
         seen_ads = json.load(f)
@@ -32,6 +33,7 @@ print(f"آگهی‌های قبلی: {len(seen_ads)}")
 
 all_ads = []
 
+# دریافت آگهی‌ها از شهرها
 for city in CITIES:
 
     time.sleep(10)
@@ -88,19 +90,13 @@ for city in CITIES:
 
             ad_id = match.group(1)
 
-            if any(
-                x["id"] == ad_id
-                for x in all_ads
-            ):
+            if any(x["id"] == ad_id for x in all_ads):
                 continue
 
             all_ads.append({
                 "id": ad_id,
                 "title": title,
-                "link": urljoin(
-                    BASE_URL,
-                    href
-                ),
+                "link": urljoin(BASE_URL, href),
                 "city": city
             })
 
@@ -108,6 +104,7 @@ for city in CITIES:
         print(f"خطا در {city}: {e}")
 
 
+# فقط آگهی‌هایی که قبلاً ارسال نشده‌اند
 new_ads = [
     ad for ad in all_ads
     if ad["id"] not in seen_ads
@@ -122,13 +119,10 @@ print(f"آگهی‌های جدید: {len(new_ads)}")
 print(f"انتخاب شده: {len(ads_to_send)}")
 print("=" * 60)
 
-for i, ad in enumerate(ads_to_send, 1):
-    print(f"{i}. {ad['city']} | {ad['id']}")
-    print(ad["title"])
-    print(ad["link"])
-    print()
+
 BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = "8531717188"
+
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
@@ -139,14 +133,20 @@ def send_telegram(message):
         "disable_web_page_preview": False
     }
 
-    response = requests.post(url, data=data, timeout=20)
+    response = requests.post(
+        url,
+        data=data,
+        timeout=20
+    )
 
     print("Telegram:", response.status_code)
 
     return response.status_code == 200
 
 
+# ارسال آگهی‌ها
 for ad in ads_to_send:
+
     message = (
         f"🟢 آگهی استخدام\n\n"
         f"📌 {ad['title']}\n"
@@ -155,15 +155,28 @@ for ad in ads_to_send:
     )
 
     if send_telegram(message):
+
         print(f"✅ ارسال شد: {ad['id']}")
+
+        # فقط بعد از ارسال موفق ذخیره شود
+        if ad["id"] not in seen_ads:
+            seen_ads.append(ad["id"])
+
+            with open(
+                SEEN_FILE,
+                "w",
+                encoding="utf-8"
+            ) as f:
+                json.dump(
+                    seen_ads,
+                    f,
+                    ensure_ascii=False,
+                    indent=2
+                )
+
     else:
         print(f"❌ ارسال نشد: {ad['id']}")
-# ذخیره آگهی‌های ارسال‌شده
-for ad in ads_to_send:
-    if ad["id"] not in seen_ads:
-        seen_ads.append(ad["id"])
 
-with open(SEEN_FILE, "w", encoding="utf-8") as f:
-    json.dump(seen_ads, f, ensure_ascii=False, indent=2)
 
+print()
 print(f"💾 تعداد آگهی‌های ذخیره‌شده: {len(seen_ads)}")
