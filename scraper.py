@@ -127,7 +127,7 @@ for i, ad in enumerate(ads_to_send, 1):
     print(ad["title"])
     print(ad["link"])
     print()
-BOT_TOKEN = 
+BOT_TOKEN = os.environ["BOT_TOKEN"]
 CHAT_ID = "8531717188"
 
 def send_telegram(message):
