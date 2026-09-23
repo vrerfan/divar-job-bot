@@ -1,15 +1,16 @@
+import os
+import json
+import re
 import requests
 from bs4 import BeautifulSoup
-from urllib.parse import urljoin
-import re
-import json
-import os
-import time
+from telegram import Bot
+from playwright.sync_api import sync_playwright
 
 
-# ==========================================
-# تنظیمات
-# ==========================================
+BOT_TOKEN = os.environ["BOT_TOKEN"]
+CHAT_ID = "8531717188"
+
+SEEN_FILE = "seen_ads.json"
 
 CITIES = [
     "karaj",
@@ -18,627 +19,361 @@ CITIES = [
     "hashtgerd",
     "taleghan",
     "eshtehard",
+    "savojbolagh",
+    "kordan",
+    "mahdasht",
+    "mohammadshahr",
+    "meshkindasht",
 ]
 
-BASE_URL = "https://divar.ir"
-SEEN_FILE = "seen_ads.json"
 
-BOT_TOKEN = os.environ["BOT_TOKEN"]
-CHAT_ID = "8531717188"
-
-HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-        "AppleWebKit/537.36 "
-        "(KHTML, like Gecko) "
-        "Chrome/140.0 Safari/537.36"
-    )
-}
-
-
-# ==========================================
-# خواندن آگهی‌های قبلی
-# ==========================================
-
-try:
-    with open(SEEN_FILE, "r", encoding="utf-8") as f:
-        seen_ads = json.load(f)
-
-    if not isinstance(seen_ads, list):
-        seen_ads = []
-
-except Exception:
-    seen_ads = []
-
-print(f"آگهی‌های قبلی: {len(seen_ads)}")
-
-
-# ==========================================
-# دریافت صفحه آگهی
-# ==========================================
-
-def get_ad_page(link):
+def load_seen():
+    if not os.path.exists(SEEN_FILE):
+        return []
 
     try:
+        with open(SEEN_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
 
-        response = requests.get(
-            link,
-            headers=HEADERS,
-            timeout=30
+
+def save_seen(seen):
+    with open(SEEN_FILE, "w", encoding="utf-8") as f:
+        json.dump(seen, f, ensure_ascii=False, indent=2)
+
+
+def get_listing_urls():
+    urls = []
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/131.0.0.0 Safari/537.36"
+        )
+    }
+
+    for city in CITIES:
+        url = f"https://divar.ir/s/{city}/employment-business"
+
+        try:
+            response = requests.get(url, headers=headers, timeout=30)
+
+            if response.status_code != 200:
+                print(f"❌ {city}: HTTP {response.status_code}")
+                continue
+
+            soup = BeautifulSoup(response.text, "html.parser")
+
+            for a in soup.find_all("a", href=True):
+                href = a["href"]
+
+                if "/v/" in href:
+                    if href.startswith("/"):
+                        href = "https://divar.ir" + href
+
+                    if href not in urls:
+                        urls.append(href)
+
+            print(f"✅ {city}: {len(urls)} آگهی پیدا شد")
+
+        except Exception as e:
+            print(f"❌ خطا در {city}: {e}")
+
+    return urls
+
+
+def get_ad_details(page, url):
+    try:
+        print(f"🔎 باز کردن: {url}")
+
+        page.goto(
+            url,
+            wait_until="domcontentloaded",
+            timeout=60000
         )
 
-        print(
-            f"دریافت آگهی: {response.status_code}"
+        page.wait_for_timeout(3000)
+
+        fields = {}
+
+        rows = page.locator(
+            'div[data-testid="unexpandable-info-row"]'
         )
 
-        if response.status_code != 200:
-            return None
+        count = rows.count()
 
-        return BeautifulSoup(
-            response.text,
-            "html.parser"
-        )
+        for i in range(count):
+            row = rows.nth(i)
 
-    except Exception as e:
+            title = row.locator(
+                ".kt-unexpandable-row__title"
+            ).inner_text().strip()
 
-        print(
-            f"⚠️ خطا در دریافت آگهی: {e}"
-        )
+            value = row.locator(
+                ".kt-unexpandable-row__value"
+            ).inner_text().strip()
 
-        return None
+            if title and value:
+                fields[title] = value
 
+        # پیدا کردن متن توضیحات از DOM
+        body_text = page.locator("body").inner_text()
 
-# ==========================================
-# استخراج اطلاعات ساختاریافته Divar
-# ==========================================
+        # عنوان آگهی
+        title = fields.get("عنوان شغلی", "")
 
-def extract_divar_fields(soup):
+        if not title:
+            try:
+                title = page.locator("h1").first.inner_text().strip()
+            except Exception:
+                title = ""
 
-    fields = {}
+        print(f"📌 عنوان: {title}")
+        print(f"📋 فیلدها: {fields}")
 
-    if not soup:
-        return fields
-
-    rows = soup.select(
-        'div[data-testid="unexpandable-info-row"]'
-    )
-
-    print(
-        f"تعداد فیلدهای پیدا شده: {len(rows)}"
-    )
-
-    for row in rows:
-
-        title_element = row.select_one(
-            ".kt-unexpandable-row__title"
-        )
-
-        value_element = row.select_one(
-            ".kt-unexpandable-row__value"
-        )
-
-        if not title_element or not value_element:
-            continue
-
-        field_name = title_element.get_text(
-            " ",
-            strip=True
-        )
-
-        field_value = value_element.get_text(
-            " ",
-            strip=True
-        )
-
-        if not field_name or not field_value:
-            continue
-
-        fields[field_name] = field_value
-
-        print(
-            f"فیلد: {field_name} = {field_value}"
-        )
-
-    return fields
-
-
-# ==========================================
-# استخراج توضیحات واقعی آگهی
-# ==========================================
-
-def extract_real_description(soup, title):
-
-    if not soup:
-        return ""
-
-    # کلاس‌های رایج توضیحات آگهی
-    possible_selectors = [
-        '[data-testid="description"]',
-        '.kt-description-row__text',
-        '.kt-description-row',
-    ]
-
-    for selector in possible_selectors:
-
-        element = soup.select_one(
-            selector
-        )
-
-        if element:
-
-            text = element.get_text(
-                "\n",
-                strip=True
-            )
-
-            if text:
-
-                lines = []
-
-                for line in text.splitlines():
-
-                    line = line.strip()
-
-                    if not line:
-                        continue
-
-                    if line == title:
-                        continue
-
-                    if "divar.ir" in line.lower():
-                        continue
-
-                    if line not in lines:
-                        lines.append(line)
-
-                return "\n".join(lines)
-
-    return ""
-
-
-# ==========================================
-# دریافت اطلاعات کامل آگهی
-# ==========================================
-
-def get_ad_details(link, title):
-
-    soup = get_ad_page(link)
-
-    if not soup:
         return {
-            "fields": {},
-            "description": ""
+            "title": title,
+            "fields": fields,
+            "description": body_text,
         }
 
-    fields = extract_divar_fields(
-        soup
-    )
+    except Exception as e:
+        print(f"❌ خطا در دریافت آگهی: {e}")
 
-    description = extract_real_description(
-        soup,
-        title
-    )
-
-    return {
-        "fields": fields,
-        "description": description
-    }
+        return {
+            "title": "",
+            "fields": {},
+            "description": "",
+        }
 
 
-# ==========================================
-# ساخت متن آگهی
-# ==========================================
+def clean_text(text):
+    if not text:
+        return ""
 
-def build_channel_post(ad):
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
-    title = ad["title"]
 
-    fields = ad.get(
-        "fields",
-        {}
-    )
+def make_post(details):
+    fields = details["fields"]
+    title = details["title"]
 
-    description = ad.get(
-        "description",
-        ""
-    )
+    if not title:
+        title = "استخدام نیروی کار"
 
-    post = []
+    # اطلاعات ساختاریافته دیوار
+    salary = fields.get("دستمزد", "")
+    gender = fields.get("جنسیت", "")
+    experience = fields.get("سابقه کار", "")
+    cooperation = fields.get("نوع همکاری", "")
+    payment = fields.get("شیوهٔ پرداخت", "")
+    insurance = fields.get("بیمه", "")
 
-    # ======================================
+    lines = []
+
     # عنوان
-    # ======================================
+    headline = f"# 🟢 {title}"
 
-    post.append(
-        f"# 🟢 {title}"
-    )
+    if salary:
+        headline += f" | حقوق {salary}"
 
-    post.append("")
+    lines.append(headline)
+    lines.append("")
 
-    # ======================================
-    # عنوان شغلی
-    # ======================================
+    # فیلدها
+    lines.append(f"🟢 عنوان شغلی: {title}")
 
-    post.append(
-        f"🟢 عنوان شغلی: {title}"
-    )
+    if gender:
+        lines.append(f"🟢 جنسیت: {gender}")
 
-    # ======================================
-    # تبدیل نام فیلدهای Divar
-    # ======================================
+    if experience:
+        lines.append(f"🟢 سابقه کار: {experience}")
 
-    field_map = {
-        "جنسیت": "جنسیت",
-        "محدوده سنی": "محدوده سنی",
-        "سن": "محدوده سنی",
-        "سابقه کاری": "سابقه کار",
-        "سابقه کار": "سابقه کار",
-        "نوع همکاری": "نوع همکاری",
-        "ساعت کاری": "ساعت کاری",
-        "حقوق": "حقوق",
-        "دستمزد": "حقوق",
-        "شیوهٔ پرداخت": "پرداخت",
-        "شیوه پرداخت": "پرداخت",
-        "نحوه پرداخت": "پرداخت",
-        "نوع استخدام": "نوع استخدام",
-    }
+    if cooperation:
+        lines.append(f"🟢 نوع همکاری: {cooperation}")
 
-    added_fields = set()
+    if payment:
+        lines.append(f"🟢 شیوه پرداخت: {payment}")
 
-    for divar_name, channel_name in field_map.items():
+    if insurance:
+        lines.append(f"🟢 بیمه: {insurance}")
 
-        if divar_name not in fields:
-            continue
+    if salary:
+        lines.append(f"🟢 حقوق: {salary}")
 
-        value = fields[
-            divar_name
-        ].strip()
+    lines.append("")
 
-        if not value:
-            continue
-
-        if channel_name in added_fields:
-            continue
-
-        post.append(
-            f"🟢 {channel_name}: {value}"
-        )
-
-        added_fields.add(
-            channel_name
-        )
-
-    # ======================================
     # توضیحات
-    # ======================================
+    description = details.get("description", "")
 
-    if description:
+    # حذف بخش‌های غیرضروری از متن body
+    description_lines = []
 
-        post.append("")
-        post.append(
-            "### 🟢 توضیحات"
-        )
+    for line in description.splitlines():
+        line = line.strip()
 
-        lines = description.splitlines()
-
-        count = 0
-
-        for line in lines:
-
-            line = line.strip()
-
-            if not line:
-                continue
-
-            if line == title:
-                continue
-
-            if "divar.ir" in line.lower():
-                continue
-
-            post.append(
-                f"🟢 {line}"
-            )
-
-            count += 1
-
-            if count >= 25:
-                break
-
-    # ======================================
-    # پایان ثابت
-    # ======================================
-
-    post.append("")
-
-    post.append(
-        "کانال تلگرام"
-    )
-
-    post.append(
-        "@karyabi_alborzi"
-    )
-
-    post.append("")
-
-    post.append(
-        "جهت ثبت آگهی"
-    )
-
-    post.append(
-        "@Karyabi_karaji"
-    )
-
-    return "\n".join(post)
-
-
-# ==========================================
-# دریافت آگهی‌های شهرها
-# ==========================================
-
-all_ads = []
-
-for city in CITIES:
-
-    print()
-    print(
-        f"در حال بررسی: {city}"
-    )
-
-    time.sleep(8)
-
-    url = (
-        f"{BASE_URL}/s/"
-        f"{city}/jobs"
-    )
-
-    try:
-
-        response = requests.get(
-            url,
-            headers=HEADERS,
-            timeout=30
-        )
-
-        if response.status_code == 429:
-
-            print(
-                "⏳ محدودیت دیوار..."
-            )
-
-            time.sleep(30)
-
-            response = requests.get(
-                url,
-                headers=HEADERS,
-                timeout=30
-            )
-
-        if response.status_code != 200:
-
-            print(
-                f"❌ خطا در {city}: "
-                f"{response.status_code}"
-            )
-
+        if not line:
             continue
 
-        soup = BeautifulSoup(
-            response.text,
-            "html.parser"
+        if line in fields:
+            continue
+
+        if line in fields.values():
+            continue
+
+        if len(line) < 2:
+            continue
+
+        description_lines.append(line)
+
+    # فقط بخش‌هایی که احتمالاً توضیح آگهی هستند
+    useful_description = []
+
+    for line in description_lines:
+        if line == title:
+            continue
+
+        if line.startswith("شیوهٔ پرداخت"):
+            continue
+
+        if line.startswith("عنوان شغلی"):
+            continue
+
+        if line.startswith("دستمزد"):
+            continue
+
+        if line.startswith("جنسیت"):
+            continue
+
+        if line.startswith("بیمه"):
+            continue
+
+        if line.startswith("سابقه کار"):
+            continue
+
+        if line.startswith("نوع همکاری"):
+            continue
+
+        useful_description.append(line)
+
+    # جلوگیری از متن‌های خیلی طولانی و بی‌ربط
+    if useful_description:
+        lines.append("### 🟢 توضیحات")
+
+        for line in useful_description[:20]:
+            lines.append(f"🟢 {clean_text(line)}")
+
+        lines.append("")
+
+    # آیدی‌های ثابت
+    lines.append("کانال تلگرام")
+    lines.append("@karyabi_alborzi")
+    lines.append("")
+    lines.append("جهت ثبت آگهی")
+    lines.append("@Karyabi_karaji")
+
+    return "\n".join(lines)
+
+
+def send_telegram(text):
+    bot = Bot(token=BOT_TOKEN)
+
+    bot.send_message(
+        chat_id=CHAT_ID,
+        text=text
+    )
+
+
+def main():
+    print("🚀 شروع ربات")
+
+    seen = load_seen()
+
+    print(f"📦 تعداد آگهی‌های قبلی: {len(seen)}")
+
+    listing_urls = get_listing_urls()
+
+    if not listing_urls:
+        print("❌ هیچ آگهی‌ای پیدا نشد.")
+        return
+
+    new_ads = []
+
+    for url in listing_urls:
+        match = re.search(r"/v/([^/?#]+)", url)
+
+        if not match:
+            continue
+
+        ad_id = match.group(1)
+
+        if ad_id in seen:
+            continue
+
+        new_ads.append((ad_id, url))
+
+        if len(new_ads) >= 10:
+            break
+
+    print(f"🆕 آگهی جدید پیدا شده: {len(new_ads)}")
+
+    if not new_ads:
+        print("ℹ️ آگهی جدیدی برای ارسال وجود ندارد.")
+        return
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=True
         )
 
-        for a in soup.find_all(
-            "a",
-            href=True
-        ):
+        page = browser.new_page(
+            viewport={
+                "width": 1366,
+                "height": 900
+            },
+            user_agent=(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+        )
 
-            href = a["href"]
+        for ad_id, url in new_ads:
 
-            if not href.startswith("/v/"):
+            details = get_ad_details(page, url)
+
+            # اگر صفحه اطلاعات واقعی نداد،
+            # آگهی را seen نکن تا در اجرای بعدی دوباره امتحان شود.
+            if not details["fields"] and not details["description"]:
+                print(f"⚠️ اطلاعات آگهی {ad_id} دریافت نشد.")
                 continue
 
-            title = a.get_text(
-                " ",
-                strip=True
-            )
+            post = make_post(details)
 
-            if not title:
-                continue
+            print("\n==============================")
+            print(post)
+            print("==============================\n")
 
-            match = re.search(
-                r"/([A-Za-z0-9_-]+)$",
-                href
-            )
+            try:
+                send_telegram(post)
 
-            if not match:
-                continue
+                print(f"✅ ارسال شد: {ad_id}")
 
-            ad_id = match.group(1)
+                seen.append(ad_id)
+                save_seen(seen)
 
-            if any(
-                ad["id"] == ad_id
-                for ad in all_ads
-            ):
-                continue
+            except Exception as e:
+                print(f"❌ خطا در ارسال تلگرام: {e}")
 
-            all_ads.append({
-                "id": ad_id,
-                "title": title,
-                "link": urljoin(
-                    BASE_URL,
-                    href
-                ),
-                "city": city
-            })
+        browser.close()
 
-    except Exception as e:
+    save_seen(seen)
 
-        print(
-            f"❌ خطا در {city}: {e}"
-        )
+    print("🏁 پایان اجرای ربات")
 
 
-# ==========================================
-# انتخاب 10 آگهی جدید
-# ==========================================
-
-new_ads = [
-    ad
-    for ad in all_ads
-    if ad["id"] not in seen_ads
-]
-
-ads_to_send = new_ads[:10]
-
-
-print()
-print("=" * 60)
-print(
-    f"کل آگهی‌ها: {len(all_ads)}"
-)
-print(
-    f"آگهی‌های جدید: {len(new_ads)}"
-)
-print(
-    f"انتخاب شده: {len(ads_to_send)}"
-)
-print("=" * 60)
-
-
-# ==========================================
-# ارسال تلگرام
-# ==========================================
-
-def send_telegram(message):
-
-    url = (
-        f"https://api.telegram.org/"
-        f"bot{BOT_TOKEN}/sendMessage"
-    )
-
-    data = {
-        "chat_id": CHAT_ID,
-        "text": message,
-        "disable_web_page_preview": True
-    }
-
-    try:
-
-        response = requests.post(
-            url,
-            data=data,
-            timeout=30
-        )
-
-        print(
-            "Telegram:",
-            response.status_code
-        )
-
-        if response.status_code != 200:
-            print(response.text)
-
-        return (
-            response.status_code == 200
-        )
-
-    except Exception as e:
-
-        print(
-            f"❌ خطای تلگرام: {e}"
-        )
-
-        return False
-
-
-# ==========================================
-# پردازش آگهی‌ها
-# ==========================================
-
-for index, ad in enumerate(
-    ads_to_send,
-    1
-):
-
-    print()
-    print(
-        f"📝 آگهی "
-        f"{index}/{len(ads_to_send)}"
-    )
-
-    print(
-        f"عنوان: {ad['title']}"
-    )
-
-    # دریافت اطلاعات واقعی Divar
-    details = get_ad_details(
-        ad["link"],
-        ad["title"]
-    )
-
-    ad["fields"] = details[
-        "fields"
-    ]
-
-    ad["description"] = details[
-        "description"
-    ]
-
-    # ساخت متن نهایی
-    channel_post = (
-        build_channel_post(ad)
-    )
-
-    print()
-    print("----- متن آماده -----")
-    print(channel_post)
-    print("---------------------")
-
-    # ارسال
-    if send_telegram(
-        channel_post
-    ):
-
-        print(
-            f"✅ ارسال شد: "
-            f"{ad['id']}"
-        )
-
-        if ad["id"] not in seen_ads:
-
-            seen_ads.append(
-                ad["id"]
-            )
-
-    else:
-
-        print(
-            f"❌ ارسال نشد: "
-            f"{ad['id']}"
-        )
-
-
-# ==========================================
-# ذخیره آگهی‌های ارسال شده
-# ==========================================
-
-with open(
-    SEEN_FILE,
-    "w",
-    encoding="utf-8"
-) as f:
-
-    json.dump(
-        seen_ads,
-        f,
-        ensure_ascii=False,
-        indent=2
-    )
-
-
-print()
-print(
-    f"💾 تعداد ذخیره‌شده: "
-    f"{len(seen_ads)}"
-)
+if __name__ == "__main__":
+    main()
