@@ -54,52 +54,10 @@ print(f"آگهی‌های قبلی: {len(seen_ads)}")
 
 
 # ==========================================
-# تمیز کردن متن
+# دریافت صفحه آگهی
 # ==========================================
 
-def clean_text(text):
-
-    lines = []
-
-    for line in text.splitlines():
-
-        line = line.strip()
-
-        if not line:
-            continue
-
-        # حذف خطوط تکراری
-        if line in lines:
-            continue
-
-        # موارد اضافی رابط کاربری دیوار
-        ignored_exact = [
-            "دیوار",
-            "سایت دیوار",
-            "صفحه اصلی",
-            "ورود",
-            "ثبت نام",
-            "ثبت آگهی",
-            "گزارش آگهی",
-            "آگهی‌های مشابه",
-            "مشاهده آگهی‌های مشابه",
-            "خانه",
-            "دسته‌بندی‌ها",
-        ]
-
-        if line in ignored_exact:
-            continue
-
-        lines.append(line)
-
-    return lines
-
-
-# ==========================================
-# دریافت جزئیات آگهی
-# ==========================================
-
-def get_ad_details(link):
+def get_ad_page(link):
 
     try:
 
@@ -110,336 +68,250 @@ def get_ad_details(link):
         )
 
         print(
-            f"جزئیات آگهی: {response.status_code}"
+            f"دریافت آگهی: {response.status_code}"
         )
 
         if response.status_code != 200:
-            return ""
+            return None
 
-        soup = BeautifulSoup(
+        return BeautifulSoup(
             response.text,
             "html.parser"
         )
 
-        # حذف تگ‌های غیرضروری
-        for tag in soup([
-            "script",
-            "style",
-            "noscript",
-            "svg"
-        ]):
-            tag.decompose()
-
-        # تلاش برای پیدا کردن محتوای اصلی آگهی
-        candidates = []
-
-        # متا description
-        meta = soup.find(
-            "meta",
-            attrs={"name": "description"}
-        )
-
-        if meta and meta.get("content"):
-            candidates.append(
-                meta.get("content")
-            )
-
-        # تمام پاراگراف‌ها
-        for tag in soup.find_all(
-            ["p", "div"]
-        ):
-
-            text = tag.get_text(
-                " ",
-                strip=True
-            )
-
-            if not text:
-                continue
-
-            if len(text) < 10:
-                continue
-
-            if len(text) > 5000:
-                continue
-
-            candidates.append(text)
-
-        # متن کلی صفحه
-        page_text = soup.get_text(
-            "\n",
-            strip=True
-        )
-
-        lines = clean_text(page_text)
-
-        # پیدا کردن بخش‌هایی که احتمالاً متن آگهی هستند
-        useful_lines = []
-
-        for line in lines:
-
-            # موارد واضح رابط کاربری
-            if line in [
-                "دیوار",
-                "سایت دیوار",
-                "ثبت آگهی",
-                "گزارش آگهی",
-                "آگهی‌های مشابه",
-                "ورود",
-                "ثبت نام",
-            ]:
-                continue
-
-            # متن‌های خیلی کوتاه معمولاً UI هستند
-            if len(line) <= 2:
-                continue
-
-            useful_lines.append(line)
-
-        # حذف خطوط ابتدایی تکراری
-        final_lines = []
-
-        for line in useful_lines:
-
-            if line in final_lines:
-                continue
-
-            final_lines.append(line)
-
-        return "\n".join(final_lines)
-
     except Exception as e:
 
         print(
-            f"⚠️ خطا در دریافت جزئیات: {e}"
+            f"⚠️ خطا در دریافت آگهی: {e}"
         )
 
-        return ""
+        return None
 
 
 # ==========================================
-# پیدا کردن مقدار فیلد
+# استخراج اطلاعات ساختاریافته Divar
 # ==========================================
 
-def find_value(text, patterns):
+def extract_divar_fields(soup):
 
-    for pattern in patterns:
+    fields = {}
 
-        match = re.search(
-            pattern,
-            text,
-            re.IGNORECASE
+    if not soup:
+        return fields
+
+    rows = soup.select(
+        'div[data-testid="unexpandable-info-row"]'
+    )
+
+    print(
+        f"تعداد فیلدهای پیدا شده: {len(rows)}"
+    )
+
+    for row in rows:
+
+        title_element = row.select_one(
+            ".kt-unexpandable-row__title"
         )
 
-        if match:
+        value_element = row.select_one(
+            ".kt-unexpandable-row__value"
+        )
 
-            value = match.group(1).strip()
+        if not title_element or not value_element:
+            continue
 
-            if value:
-                return value
+        field_name = title_element.get_text(
+            " ",
+            strip=True
+        )
 
-    return None
+        field_value = value_element.get_text(
+            " ",
+            strip=True
+        )
 
+        if not field_name or not field_value:
+            continue
 
-# ==========================================
-# استخراج اطلاعات شغلی
-# ==========================================
+        fields[field_name] = field_value
 
-def extract_job_info(title, description):
+        print(
+            f"فیلد: {field_name} = {field_value}"
+        )
 
-    full_text = (
-        f"{title}\n{description}"
-    )
-
-    info = {}
-
-    info["gender"] = find_value(
-        full_text,
-        [
-            r"جنسیت\s*[:：]?\s*(خانم|آقا|مرد|زن|آقا و خانم)",
-            r"(خانم|آقا|مرد|زن)\s*(?:مورد نیاز|نیازمند)"
-        ]
-    )
-
-    info["age"] = find_value(
-        full_text,
-        [
-            r"(?:محدوده سنی|سن)\s*[:：]?\s*([^\n]+)"
-        ]
-    )
-
-    info["experience"] = find_value(
-        full_text,
-        [
-            r"(?:سابقه کار|سابقه)\s*[:：]?\s*([^\n]+)"
-        ]
-    )
-
-    info["cooperation"] = find_value(
-        full_text,
-        [
-            r"(?:نوع همکاری)\s*[:：]?\s*([^\n]+)",
-            r"(تمام[‌ ]?وقت|پاره[‌ ]?وقت|دورکاری)"
-        ]
-    )
-
-    info["hours"] = find_value(
-        full_text,
-        [
-            r"(?:ساعت کاری|ساعات کاری)\s*[:：]?\s*([^\n]+)"
-        ]
-    )
-
-    info["salary"] = find_value(
-        full_text,
-        [
-            r"(?:حقوق|دستمزد|درآمد)\s*[:：]?\s*([^\n]+)",
-            r"((?:حداقل|حداکثر)?\s*\d+(?:\s*تا\s*\d+)?\s*میلیون\s*تومان)"
-        ]
-    )
-
-    info["payment"] = find_value(
-        full_text,
-        [
-            r"(?:پرداخت|نحوه پرداخت)\s*[:：]?\s*([^\n]+)",
-            r"(ماهانه|هفتگی|روزانه)"
-        ]
-    )
-
-    info["employment"] = find_value(
-        full_text,
-        [
-            r"(?:نوع استخدام)\s*[:：]?\s*([^\n]+)",
-            r"(رسمی|قراردادی|آزمایشی)"
-        ]
-    )
-
-    return info
+    return fields
 
 
 # ==========================================
-# استخراج متن مفید آگهی
+# استخراج توضیحات واقعی آگهی
 # ==========================================
 
-def extract_description(title, raw_text):
+def extract_real_description(soup, title):
 
-    if not raw_text:
+    if not soup:
         return ""
 
-    lines = clean_text(raw_text)
+    # کلاس‌های رایج توضیحات آگهی
+    possible_selectors = [
+        '[data-testid="description"]',
+        '.kt-description-row__text',
+        '.kt-description-row',
+    ]
 
-    result = []
+    for selector in possible_selectors:
 
-    for line in lines:
+        element = soup.select_one(
+            selector
+        )
 
-        # عنوان را دوباره داخل توضیحات نیاور
-        if line == title:
-            continue
+        if element:
 
-        # موارد UI
-        if line in [
-            "دیوار",
-            "سایت دیوار",
-            "ثبت آگهی",
-            "گزارش آگهی",
-            "آگهی‌های مشابه",
-            "مشاهده آگهی‌های مشابه",
-            "صفحه اصلی",
-            "ورود",
-            "ثبت نام",
-        ]:
-            continue
+            text = element.get_text(
+                "\n",
+                strip=True
+            )
 
-        # لینک‌ها
-        if line.startswith("http://"):
-            continue
+            if text:
 
-        if line.startswith("https://"):
-            continue
+                lines = []
 
-        # اگر خط شامل لینک دیوار بود حذف شود
-        if "divar.ir" in line.lower():
-            continue
+                for line in text.splitlines():
 
-        if line not in result:
-            result.append(line)
+                    line = line.strip()
 
-    return "\n".join(result)
+                    if not line:
+                        continue
+
+                    if line == title:
+                        continue
+
+                    if "divar.ir" in line.lower():
+                        continue
+
+                    if line not in lines:
+                        lines.append(line)
+
+                return "\n".join(lines)
+
+    return ""
 
 
 # ==========================================
-# ساخت پست کانال
+# دریافت اطلاعات کامل آگهی
+# ==========================================
+
+def get_ad_details(link, title):
+
+    soup = get_ad_page(link)
+
+    if not soup:
+        return {
+            "fields": {},
+            "description": ""
+        }
+
+    fields = extract_divar_fields(
+        soup
+    )
+
+    description = extract_real_description(
+        soup,
+        title
+    )
+
+    return {
+        "fields": fields,
+        "description": description
+    }
+
+
+# ==========================================
+# ساخت متن آگهی
 # ==========================================
 
 def build_channel_post(ad):
 
     title = ad["title"]
+
+    fields = ad.get(
+        "fields",
+        {}
+    )
+
     description = ad.get(
         "description",
         ""
     )
 
-    info = extract_job_info(
-        title,
-        description
-    )
-
     post = []
 
+    # ======================================
     # عنوان
+    # ======================================
+
     post.append(
         f"# 🟢 {title}"
     )
 
     post.append("")
 
+    # ======================================
     # عنوان شغلی
+    # ======================================
+
     post.append(
         f"🟢 عنوان شغلی: {title}"
     )
 
-    # اطلاعات فقط در صورت وجود واقعی
-    if info["gender"]:
+    # ======================================
+    # تبدیل نام فیلدهای Divar
+    # ======================================
+
+    field_map = {
+        "جنسیت": "جنسیت",
+        "محدوده سنی": "محدوده سنی",
+        "سن": "محدوده سنی",
+        "سابقه کاری": "سابقه کار",
+        "سابقه کار": "سابقه کار",
+        "نوع همکاری": "نوع همکاری",
+        "ساعت کاری": "ساعت کاری",
+        "حقوق": "حقوق",
+        "دستمزد": "حقوق",
+        "شیوهٔ پرداخت": "پرداخت",
+        "شیوه پرداخت": "پرداخت",
+        "نحوه پرداخت": "پرداخت",
+        "نوع استخدام": "نوع استخدام",
+    }
+
+    added_fields = set()
+
+    for divar_name, channel_name in field_map.items():
+
+        if divar_name not in fields:
+            continue
+
+        value = fields[
+            divar_name
+        ].strip()
+
+        if not value:
+            continue
+
+        if channel_name in added_fields:
+            continue
+
         post.append(
-            f"🟢 جنسیت: {info['gender']}"
+            f"🟢 {channel_name}: {value}"
         )
 
-    if info["age"]:
-        post.append(
-            f"🟢 محدوده سنی: {info['age']}"
+        added_fields.add(
+            channel_name
         )
 
-    if info["experience"]:
-        post.append(
-            f"🟢 سابقه کار: {info['experience']}"
-        )
-
-    if info["cooperation"]:
-        post.append(
-            f"🟢 نوع همکاری: {info['cooperation']}"
-        )
-
-    if info["hours"]:
-        post.append(
-            f"🟢 ساعت کاری: {info['hours']}"
-        )
-
-    if info["salary"]:
-        post.append(
-            f"🟢 حقوق: {info['salary']}"
-        )
-
-    if info["payment"]:
-        post.append(
-            f"🟢 پرداخت: {info['payment']}"
-        )
-
-    if info["employment"]:
-        post.append(
-            f"🟢 نوع استخدام: {info['employment']}"
-        )
-
+    # ======================================
     # توضیحات
+    # ======================================
+
     if description:
 
         post.append("")
@@ -447,14 +319,11 @@ def build_channel_post(ad):
             "### 🟢 توضیحات"
         )
 
-        description_lines = (
-            description.splitlines()
-        )
+        lines = description.splitlines()
 
-        # حداکثر 25 خط مفید
         count = 0
 
-        for line in description_lines:
+        for line in lines:
 
             line = line.strip()
 
@@ -467,18 +336,6 @@ def build_channel_post(ad):
             if "divar.ir" in line.lower():
                 continue
 
-            if line in [
-                "دیوار",
-                "سایت دیوار",
-                "ثبت آگهی",
-                "گزارش آگهی",
-                "آگهی‌های مشابه",
-                "صفحه اصلی",
-                "ورود",
-                "ثبت نام",
-            ]:
-                continue
-
             post.append(
                 f"🟢 {line}"
             )
@@ -488,19 +345,26 @@ def build_channel_post(ad):
             if count >= 25:
                 break
 
+    # ======================================
     # پایان ثابت
+    # ======================================
+
     post.append("")
+
     post.append(
         "کانال تلگرام"
     )
+
     post.append(
         "@karyabi_alborzi"
     )
 
     post.append("")
+
     post.append(
         "جهت ثبت آگهی"
     )
+
     post.append(
         "@Karyabi_karaji"
     )
@@ -509,13 +373,14 @@ def build_channel_post(ad):
 
 
 # ==========================================
-# دریافت آگهی‌ها
+# دریافت آگهی‌های شهرها
 # ==========================================
 
 all_ads = []
 
 for city in CITIES:
 
+    print()
     print(
         f"در حال بررسی: {city}"
     )
@@ -538,8 +403,7 @@ for city in CITIES:
         if response.status_code == 429:
 
             print(
-                "⏳ محدودیت دیوار - "
-                "30 ثانیه صبر..."
+                "⏳ محدودیت دیوار..."
             )
 
             time.sleep(30)
@@ -699,7 +563,7 @@ for index, ad in enumerate(
 
     print()
     print(
-        f"📝 آماده‌سازی "
+        f"📝 آگهی "
         f"{index}/{len(ads_to_send)}"
     )
 
@@ -707,21 +571,21 @@ for index, ad in enumerate(
         f"عنوان: {ad['title']}"
     )
 
-    # دریافت متن آگهی
-    raw_description = (
-        get_ad_details(
-            ad["link"]
-        )
+    # دریافت اطلاعات واقعی Divar
+    details = get_ad_details(
+        ad["link"],
+        ad["title"]
     )
 
-    ad["description"] = (
-        extract_description(
-            ad["title"],
-            raw_description
-        )
-    )
+    ad["fields"] = details[
+        "fields"
+    ]
 
-    # ساخت پست
+    ad["description"] = details[
+        "description"
+    ]
+
+    # ساخت متن نهایی
     channel_post = (
         build_channel_post(ad)
     )
@@ -756,7 +620,7 @@ for index, ad in enumerate(
 
 
 # ==========================================
-# ذخیره
+# ذخیره آگهی‌های ارسال شده
 # ==========================================
 
 with open(
@@ -775,6 +639,6 @@ with open(
 
 print()
 print(
-    f"💾 تعداد آگهی‌های ذخیره‌شده: "
+    f"💾 تعداد ذخیره‌شده: "
     f"{len(seen_ads)}"
 )
