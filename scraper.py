@@ -54,23 +54,66 @@ print(f"آگهی‌های قبلی: {len(seen_ads)}")
 
 
 # ==========================================
-# دریافت اطلاعات صفحه آگهی
+# تمیز کردن متن
+# ==========================================
+
+def clean_text(text):
+
+    lines = []
+
+    for line in text.splitlines():
+
+        line = line.strip()
+
+        if not line:
+            continue
+
+        # حذف خطوط تکراری
+        if line in lines:
+            continue
+
+        # موارد اضافی رابط کاربری دیوار
+        ignored_exact = [
+            "دیوار",
+            "سایت دیوار",
+            "صفحه اصلی",
+            "ورود",
+            "ثبت نام",
+            "ثبت آگهی",
+            "گزارش آگهی",
+            "آگهی‌های مشابه",
+            "مشاهده آگهی‌های مشابه",
+            "خانه",
+            "دسته‌بندی‌ها",
+        ]
+
+        if line in ignored_exact:
+            continue
+
+        lines.append(line)
+
+    return lines
+
+
+# ==========================================
+# دریافت جزئیات آگهی
 # ==========================================
 
 def get_ad_details(link):
 
     try:
+
         response = requests.get(
             link,
             headers=HEADERS,
             timeout=30
         )
 
+        print(
+            f"جزئیات آگهی: {response.status_code}"
+        )
+
         if response.status_code != 200:
-            print(
-                f"⚠️ خطا در دریافت جزئیات: "
-                f"{response.status_code}"
-            )
             return ""
 
         soup = BeautifulSoup(
@@ -78,45 +121,104 @@ def get_ad_details(link):
             "html.parser"
         )
 
-        # حذف قسمت‌های غیرضروری
+        # حذف تگ‌های غیرضروری
         for tag in soup([
             "script",
             "style",
-            "noscript"
+            "noscript",
+            "svg"
         ]):
             tag.decompose()
 
-        text = soup.get_text(
+        # تلاش برای پیدا کردن محتوای اصلی آگهی
+        candidates = []
+
+        # متا description
+        meta = soup.find(
+            "meta",
+            attrs={"name": "description"}
+        )
+
+        if meta and meta.get("content"):
+            candidates.append(
+                meta.get("content")
+            )
+
+        # تمام پاراگراف‌ها
+        for tag in soup.find_all(
+            ["p", "div"]
+        ):
+
+            text = tag.get_text(
+                " ",
+                strip=True
+            )
+
+            if not text:
+                continue
+
+            if len(text) < 10:
+                continue
+
+            if len(text) > 5000:
+                continue
+
+            candidates.append(text)
+
+        # متن کلی صفحه
+        page_text = soup.get_text(
             "\n",
             strip=True
         )
 
-        # مرتب کردن خطوط
-        lines = []
+        lines = clean_text(page_text)
 
-        for line in text.splitlines():
+        # پیدا کردن بخش‌هایی که احتمالاً متن آگهی هستند
+        useful_lines = []
 
-            line = line.strip()
+        for line in lines:
 
-            if not line:
+            # موارد واضح رابط کاربری
+            if line in [
+                "دیوار",
+                "سایت دیوار",
+                "ثبت آگهی",
+                "گزارش آگهی",
+                "آگهی‌های مشابه",
+                "ورود",
+                "ثبت نام",
+            ]:
                 continue
 
-            if line not in lines:
-                lines.append(line)
+            # متن‌های خیلی کوتاه معمولاً UI هستند
+            if len(line) <= 2:
+                continue
 
-        return "\n".join(lines)
+            useful_lines.append(line)
+
+        # حذف خطوط ابتدایی تکراری
+        final_lines = []
+
+        for line in useful_lines:
+
+            if line in final_lines:
+                continue
+
+            final_lines.append(line)
+
+        return "\n".join(final_lines)
 
     except Exception as e:
 
         print(
-            f"⚠️ خطا در دریافت جزئیات آگهی: {e}"
+            f"⚠️ خطا در دریافت جزئیات: {e}"
         )
 
         return ""
 
 
 # ==========================================
-# پیدا کردن مقدار یک فیلد
+# پیدا کردن مقدار فیلد
 # ==========================================
 
 def find_value(text, patterns):
@@ -140,12 +242,14 @@ def find_value(text, patterns):
 
 
 # ==========================================
-# استخراج اطلاعات آگهی
+# استخراج اطلاعات شغلی
 # ==========================================
 
 def extract_job_info(title, description):
 
-    full_text = f"{title}\n{description}"
+    full_text = (
+        f"{title}\n{description}"
+    )
 
     info = {}
 
@@ -190,7 +294,7 @@ def extract_job_info(title, description):
         full_text,
         [
             r"(?:حقوق|دستمزد|درآمد)\s*[:：]?\s*([^\n]+)",
-            r"((?:حداکثر|حداقل)?\s*\d+(?:\s*تا\s*\d+)?\s*میلیون\s*تومان)"
+            r"((?:حداقل|حداکثر)?\s*\d+(?:\s*تا\s*\d+)?\s*میلیون\s*تومان)"
         ]
     )
 
@@ -214,32 +318,87 @@ def extract_job_info(title, description):
 
 
 # ==========================================
-# ساخت متن آماده کانال
+# استخراج متن مفید آگهی
+# ==========================================
+
+def extract_description(title, raw_text):
+
+    if not raw_text:
+        return ""
+
+    lines = clean_text(raw_text)
+
+    result = []
+
+    for line in lines:
+
+        # عنوان را دوباره داخل توضیحات نیاور
+        if line == title:
+            continue
+
+        # موارد UI
+        if line in [
+            "دیوار",
+            "سایت دیوار",
+            "ثبت آگهی",
+            "گزارش آگهی",
+            "آگهی‌های مشابه",
+            "مشاهده آگهی‌های مشابه",
+            "صفحه اصلی",
+            "ورود",
+            "ثبت نام",
+        ]:
+            continue
+
+        # لینک‌ها
+        if line.startswith("http://"):
+            continue
+
+        if line.startswith("https://"):
+            continue
+
+        # اگر خط شامل لینک دیوار بود حذف شود
+        if "divar.ir" in line.lower():
+            continue
+
+        if line not in result:
+            result.append(line)
+
+    return "\n".join(result)
+
+
+# ==========================================
+# ساخت پست کانال
 # ==========================================
 
 def build_channel_post(ad):
 
     title = ad["title"]
-    description = ad.get("description", "")
+    description = ad.get(
+        "description",
+        ""
+    )
+
     info = extract_job_info(
         title,
         description
     )
 
-    # عنوان اصلی
     post = []
 
+    # عنوان
     post.append(
         f"# 🟢 {title}"
     )
 
     post.append("")
 
-    # اطلاعات شغلی
+    # عنوان شغلی
     post.append(
         f"🟢 عنوان شغلی: {title}"
     )
 
+    # اطلاعات فقط در صورت وجود واقعی
     if info["gender"]:
         post.append(
             f"🟢 جنسیت: {info['gender']}"
@@ -280,50 +439,54 @@ def build_channel_post(ad):
             f"🟢 نوع استخدام: {info['employment']}"
         )
 
-    # توضیحات آگهی
+    # توضیحات
     if description:
 
         post.append("")
-        post.append("### 🟢 توضیحات")
+        post.append(
+            "### 🟢 توضیحات"
+        )
 
-        # خطوطی که بیشتر شبیه اطلاعات فنی صفحه هستند حذف شوند
-        clean_lines = []
+        description_lines = (
+            description.splitlines()
+        )
 
-        for line in description.splitlines():
+        # حداکثر 25 خط مفید
+        count = 0
+
+        for line in description_lines:
 
             line = line.strip()
 
             if not line:
                 continue
 
-            if len(line) < 2:
+            if line == title:
                 continue
 
-            # موارد مربوط به UI دیوار
-            ignored = [
+            if "divar.ir" in line.lower():
+                continue
+
+            if line in [
                 "دیوار",
+                "سایت دیوار",
                 "ثبت آگهی",
                 "گزارش آگهی",
                 "آگهی‌های مشابه",
                 "صفحه اصلی",
                 "ورود",
                 "ثبت نام",
-            ]
-
-            if line in ignored:
+            ]:
                 continue
-
-            if line == title:
-                continue
-
-            clean_lines.append(line)
-
-        # حداکثر متن مفید
-        for line in clean_lines[:30]:
 
             post.append(
                 f"🟢 {line}"
             )
+
+            count += 1
+
+            if count >= 25:
+                break
 
     # پایان ثابت
     post.append("")
@@ -353,11 +516,16 @@ all_ads = []
 
 for city in CITIES:
 
-    print(f"در حال بررسی: {city}")
+    print(
+        f"در حال بررسی: {city}"
+    )
 
     time.sleep(8)
 
-    url = f"{BASE_URL}/s/{city}/jobs"
+    url = (
+        f"{BASE_URL}/s/"
+        f"{city}/jobs"
+    )
 
     try:
 
@@ -448,7 +616,7 @@ for city in CITIES:
 
 
 # ==========================================
-# انتخاب آگهی‌های جدید
+# انتخاب 10 آگهی جدید
 # ==========================================
 
 new_ads = [
@@ -507,7 +675,9 @@ def send_telegram(message):
         if response.status_code != 200:
             print(response.text)
 
-        return response.status_code == 200
+        return (
+            response.status_code == 200
+        )
 
     except Exception as e:
 
@@ -519,7 +689,7 @@ def send_telegram(message):
 
 
 # ==========================================
-# پردازش و ارسال
+# پردازش آگهی‌ها
 # ==========================================
 
 for index, ad in enumerate(
@@ -537,16 +707,23 @@ for index, ad in enumerate(
         f"عنوان: {ad['title']}"
     )
 
-    # دریافت متن کامل آگهی
-    description = get_ad_details(
-        ad["link"]
+    # دریافت متن آگهی
+    raw_description = (
+        get_ad_details(
+            ad["link"]
+        )
     )
 
-    ad["description"] = description
+    ad["description"] = (
+        extract_description(
+            ad["title"],
+            raw_description
+        )
+    )
 
-    # ساخت متن کانال
-    channel_post = build_channel_post(
-        ad
+    # ساخت پست
+    channel_post = (
+        build_channel_post(ad)
     )
 
     print()
@@ -555,10 +732,13 @@ for index, ad in enumerate(
     print("---------------------")
 
     # ارسال
-    if send_telegram(channel_post):
+    if send_telegram(
+        channel_post
+    ):
 
         print(
-            f"✅ ارسال شد: {ad['id']}"
+            f"✅ ارسال شد: "
+            f"{ad['id']}"
         )
 
         if ad["id"] not in seen_ads:
@@ -570,12 +750,13 @@ for index, ad in enumerate(
     else:
 
         print(
-            f"❌ ارسال نشد: {ad['id']}"
+            f"❌ ارسال نشد: "
+            f"{ad['id']}"
         )
 
 
 # ==========================================
-# ذخیره آگهی‌های ارسال‌شده
+# ذخیره
 # ==========================================
 
 with open(
@@ -596,9 +777,4 @@ print()
 print(
     f"💾 تعداد آگهی‌های ذخیره‌شده: "
     f"{len(seen_ads)}"
-)
-
-print(
-    f"📁 فایل: "
-    f"{os.path.abspath(SEEN_FILE)}"
 )
